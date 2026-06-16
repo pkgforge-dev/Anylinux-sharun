@@ -9,10 +9,9 @@ use std::{
     io::{Read, Result, Error, Write, BufRead, BufReader, ErrorKind::{InvalidData, NotFound}}
 };
 
-use cfg_if::cfg_if;
 use walkdir::WalkDir;
 use nix::unistd::{access, AccessFlags};
-use goblin::elf::{Elf, program_header::PT_INTERP};
+use goblin::elf::Elf;
 
 
 const SHARUN_NAME: &str = env!("CARGO_PKG_NAME");
@@ -211,7 +210,6 @@ fn exec_script(path: &PathBuf, exec_args: &[String]) -> Result<()> {
     Err(Error::new(InvalidData, err))
 }
 
-#[cfg(feature = "elf32")]
 fn is_elf32(path: &String) -> Result<bool> {
     let mut file = File::open(path)?;
     let mut elf_bytes = [0; 5];
@@ -222,7 +220,6 @@ fn is_elf32(path: &String) -> Result<bool> {
     Ok(elf_bytes[4] == 1)
 }
 
-#[cfg(feature = "pyinstaller")]
 fn get_elf(path: &String, is_elf32: bool) -> Result<Vec<u8>> {
     let mut file = File::open(path)?;
     if is_elf32 {
@@ -243,7 +240,6 @@ fn get_elf(path: &String, is_elf32: bool) -> Result<Vec<u8>> {
     }
 }
 
-#[cfg(feature = "pyinstaller")]
 fn is_elf_section(elf_bytes: &[u8], section_name: &str) -> Result<bool> {
     if let Ok(elf) = Elf::parse(elf_bytes) {
         if let Some(section_headers) = elf.section_headers.as_slice().get(..) {
@@ -257,40 +253,6 @@ fn is_elf_section(elf_bytes: &[u8], section_name: &str) -> Result<bool> {
         }
     }
     Ok(false)
-}
-
-fn write_file(elf_path: &String, bytes: &[u8]) -> Result<bool> {
-    let mut file = File::create(elf_path)?;
-    file.write_all(bytes)?;
-    Ok(true)
-}
-
-fn set_interp(mut elf_bytes: Vec<u8>, elf_path: &String, new_interp: &str) -> Result<bool> {
-    let elf = Elf::parse(&elf_bytes)
-        .map_err(|err| Error::new(InvalidData, err))?;
-    let interp_header = elf.program_headers.iter().find(|header| header.p_type == PT_INTERP);
-    match interp_header {
-        Some(header) => {
-            let start = header.p_offset as usize;
-            let end = start + header.p_filesz as usize;
-            let interp_slice = &mut elf_bytes[start..end];
-            if interp_slice.last() != Some(&0) {
-                return Err(Error::new(InvalidData, "Current INTERP not NUL terminated"));
-            }
-            if new_interp.len() > (header.p_filesz as usize) - 1 {
-                return Err(Error::new(InvalidData, "Current INTERP too small"));
-            }
-            let new_interp_bytes = new_interp.as_bytes();
-            interp_slice[..new_interp_bytes.len()].copy_from_slice(new_interp_bytes);
-            for byte in interp_slice.iter_mut().take((header.p_filesz as usize) - 1).skip(new_interp_bytes.len()) { *byte = 0 }
-            interp_slice[(header.p_filesz as usize) - 1] = 0;
-            write_file(elf_path, &elf_bytes)?;
-        }
-        None => {
-            return Err(Error::new(InvalidData, "Failed to find PT_INTERP header"));
-        }
-    }
-    Ok(true)
 }
 
 fn get_env_var<K: AsRef<OsStr>>(key: K) -> String {
@@ -331,7 +293,6 @@ fn read_dotenv(dotenv_dir: &str) -> Vec<String> {
     unset_envs
 }
 
-#[cfg(feature = "setenv")]
 fn add_to_xdg_data_env(xdg_data_dirs: &str, env: &str, path: &str) {
     for xdg_data_dir in xdg_data_dirs.rsplit(":") {
         let env_data_dir = Path::new(xdg_data_dir).join(path);
@@ -373,7 +334,6 @@ fn gen_library_path(library_path: &str, lib_path_file: &String) {
     }
 }
 
-#[cfg(feature = "setenv")]
 fn collect_json_files(dir: &Path) -> Vec<PathBuf> {
     let mut json_paths = Vec::new();
     if dir.exists() {
@@ -393,14 +353,12 @@ fn print_usage() {
 
 [ Usage ]: {SHARUN_NAME} [OPTIONS] [EXEC ARGS]...",
     env!("CARGO_PKG_DESCRIPTION"));
-    #[cfg(feature = "lib4bin")]
     println!("     Use lib4bin for create 'bin' and 'shared' dirs");
     println!("
 [ Arguments ]:
     [EXEC ARGS]...              Command line arguments for execution
 
 [ Options ]:");
-    #[cfg(feature = "lib4bin")]
     println!("     l,  lib4bin [ARGS]         Launch the built-in lib4bin");
     println!("    -g,  --gen-lib-path         Generate a lib.path file
     -v,  --version              Print version
@@ -503,7 +461,6 @@ fn main() {
                     }
                     return
                 }
-                #[cfg(feature = "lib4bin")]
                 "l" | "lib4bin" => {
                     let lib4bin_compressed = include_file_compress::include_file_compress_deflate!("lib4bin", 9);
                     let mut decoder = flate2::read::DeflateDecoder::new(&lib4bin_compressed[..]);
@@ -658,27 +615,15 @@ fn main() {
     }
     let bin = format!("{shared_bin}/{bin_name}");
 
-    cfg_if! {
-        if #[cfg(feature = "elf32")] {
-            let is_elf32_bin = is_elf32(&bin).unwrap_or_else(|err|{
-                eprintln!("Failed to check ELF class: {bin}: {err}");
-                exit(1)
-            });
-        } else {
-            let is_elf32_bin = false;
-        }
-    }
+    let is_elf32_bin = is_elf32(&bin).unwrap_or_else(|err|{
+        eprintln!("Failed to check ELF class: {bin}: {err}");
+        exit(1)
+    });
 
-    cfg_if! {
-        if #[cfg(feature = "pyinstaller")] {
-            let elf_bytes = get_elf(&bin, is_elf32_bin).unwrap_or_else(|err|{
-                eprintln!("Failed to read ELF: {}: {err}", &bin);
-                exit(1)
-            });
-        } else {
-            let elf_bytes = vec![];
-        }
-    }
+    let elf_bytes = get_elf(&bin, is_elf32_bin).unwrap_or_else(|err|{
+        eprintln!("Failed to read ELF: {}: {err}", &bin);
+        exit(1)
+    });
 
     let mut library_path = if is_elf32_bin {
         shared_lib32
@@ -712,21 +657,18 @@ fn main() {
         env::remove_var("SHARUN_WORKING_DIR")
     }
 
-    #[cfg(feature = "setenv")]
-    {
-        let gio_launch_desktop = PathBuf::from(&bin_dir).join("gio-launch-desktop");
-        if is_exe(&gio_launch_desktop) {
-            env::set_var("GIO_LAUNCH_DESKTOP", gio_launch_desktop)
-        }
-        if let Ok(dir) = PathBuf::from(&library_path).read_dir() {
-            for entry in dir.flatten() {
-                let entry_path = entry.path();
-                if entry_path.is_dir() {
-                    let name = entry.file_name();
-                    if let Some(name) = name.to_str() {
-                        if name.starts_with("girepository-") {
-                            env::set_var("GI_TYPELIB_PATH", entry_path)
-                        }
+    let gio_launch_desktop = PathBuf::from(&bin_dir).join("gio-launch-desktop");
+    if is_exe(&gio_launch_desktop) {
+        env::set_var("GIO_LAUNCH_DESKTOP", gio_launch_desktop)
+    }
+    if let Ok(dir) = PathBuf::from(&library_path).read_dir() {
+        for entry in dir.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                let name = entry.file_name();
+                if let Some(name) = name.to_str() {
+                    if name.starts_with("girepository-") {
+                        env::set_var("GI_TYPELIB_PATH", entry_path)
                     }
                 }
             }
@@ -750,374 +692,371 @@ fn main() {
 
     let mut lib_path_data = read_to_string(lib_path_file).unwrap_or_default();
 
-    #[cfg(feature = "setenv")]
-    {
-        if !lib_path_data.is_empty() {
-            let dirs: std::collections::HashSet<&str> = lib_path_data.split("\n").map(|string|{
-                string.split("/").nth(1).unwrap_or("")
-            }).collect();
-            for dir in dirs {
-                let dir_path = &format!("{library_path}/{dir}");
-                if dir.starts_with("python") && !is_writable(&sharun_dir) {
-                    env::set_var("PYTHONDONTWRITEBYTECODE", "1")
-                }
-                if dir.starts_with("perl") {
-                    add_to_env("PERLLIB", dir_path)
-                }
-                if dir == "gconv" {
-                    add_to_env("GCONV_PATH", dir_path)
-                }
-                if dir == "gio" {
-                    let modules = &format!("{dir_path}/modules");
-                    if Path::new(modules).exists() {
-                        env::set_var("GIO_MODULE_DIR", modules)
-                    }
-                }
-                if dir == "dri" {
-                    env::set_var("LIBGL_DRIVERS_PATH", dir_path);
-                    if get_env_var("SHARUN_NO_NVIDIA_EGL_PRIME") != "1" &&
-                        Path::new("/sys/module/nvidia/version").exists() {
-                            add_to_env("LIBVA_DRIVERS_PATH", "/run/opengl-driver/lib/dri");
-                            add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib/dri");
-                            add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib64/dri");
-                            #[cfg(target_arch = "x86_64")]
-                            add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib/x86_64-linux-gnu/dri");
-                            #[cfg(target_arch = "aarch64")]
-                            add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib/aarch64-linux-gnu/dri");
-                    }
-                    add_to_env("LIBVA_DRIVERS_PATH", dir_path)
-                }
-                if dir == "gbm" {
-                    add_to_env("GBM_BACKENDS_PATH", "/run/opengl-driver/lib/gbm");
-                    add_to_env("GBM_BACKENDS_PATH", "/usr/lib/gbm");
-                    add_to_env("GBM_BACKENDS_PATH", "/usr/lib64/gbm");
-                    #[cfg(target_arch = "x86_64")]
-                    add_to_env("GBM_BACKENDS_PATH", "/usr/lib/x86_64-linux-gnu/gbm");
-                    #[cfg(target_arch = "aarch64")]
-                    add_to_env("GBM_BACKENDS_PATH", "/usr/lib/aarch64-linux-gnu/gbm");
-                    add_to_env("GBM_BACKENDS_PATH", dir_path)
-                }
-                if dir == "libheif" {
-                    let plugins = &format!("{dir_path}/plugins");
-                    if Path::new(plugins).exists() {
-                        env::set_var("LIBHEIF_PLUGIN_PATH", plugins)
-                    } else {
-                        env::set_var("LIBHEIF_PLUGIN_PATH", dir_path)
-                    }
-                }
-                if dir == "xtables" {
-                    env::set_var("XTABLES_LIBDIR", dir_path)
-                }
-                if dir.starts_with("spa-") {
-                    env::set_var("SPA_PLUGIN_DIR", dir_path)
-                }
-                if dir.starts_with("pipewire-") {
-                    env::set_var("PIPEWIRE_MODULE_DIR", dir_path)
-                }
-                if dir.starts_with("gtk-") {
-                    add_to_env("GTK_PATH", dir_path);
-                    env::set_var("GTK_EXE_PREFIX", &sharun_dir);
-                    env::set_var("GTK_DATA_PREFIX", &sharun_dir);
-                    for entry in WalkDir::new(dir_path).into_iter().flatten() {
-                        let path = entry.path();
-                        if is_file(path) && entry.file_name().to_string_lossy() == "immodules.cache" {
-                            env::set_var("GTK_IM_MODULE_FILE", path);
-                            break
-                        }
-                    }
-                }
-                if dir == "folks" {
-                    for entry in WalkDir::new(dir_path).into_iter().flatten() {
-                        let path = entry.path();
-                        if path.is_dir() && entry.file_name().to_string_lossy() == "backends" {
-                            env::set_var("FOLKS_BACKEND_PATH", path);
-                            break
-                        }
-                    }
-                }
-                if dir.starts_with("qt") {
-                    let qt_conf = &format!("{bin_dir}/qt.conf");
-                    let plugins = &format!("{dir_path}/plugins");
-                    if Path::new(plugins).exists() && ! Path::new(qt_conf).exists() {
-                        add_to_env("QT_PLUGIN_PATH", plugins)
-                    }
-                }
-                if dir == "imlib2" {
-                    let loaders = &format!("{dir_path}/loaders");
-                    let filters = &format!("{dir_path}/filters");
-                    if Path::new(loaders).exists() {
-                        env::set_var("IMLIB2_LOADER_PATH", loaders)
-                    }
-                    if Path::new(filters).exists() {
-                        env::set_var("IMLIB2_FILTER_PATH", filters)
-                    }
-                }
-                if dir.starts_with("babl-") {
-                    env::set_var("BABL_PATH", dir_path)
-                }
-                if dir.starts_with("gegl-") {
-                    env::set_var("GEGL_PATH", dir_path)
-                }
-                if dir == "libdecor" {
-                    let plugins = &format!("{dir_path}/plugins-1");
-                    if Path::new(plugins).exists() {
-                        env::set_var("LIBDECOR_PLUGIN_DIR", plugins)
-                    }
-                }
-                if dir.starts_with("tcl") && Path::new(&format!("{dir_path}/msgs")).exists() {
-                    add_to_env("TCL_LIBRARY", dir_path);
-                    let tk = &format!("{library_path}/{}", dir.replace("tcl", "tk"));
-                    if Path::new(&tk).exists() {
-                        add_to_env("TK_LIBRARY", tk)
-                    }
-                }
-                if dir.starts_with("gstreamer-") {
-                    add_to_env("GST_PLUGIN_PATH", dir_path);
-                    add_to_env("GST_PLUGIN_SYSTEM_PATH", dir_path);
-                    add_to_env("GST_PLUGIN_SYSTEM_PATH_1_0", dir_path);
-                    let gst_scanner = &format!("{dir_path}/gst-plugin-scanner");
-                    if Path::new(gst_scanner).exists() {
-                        env::set_var("GST_PLUGIN_SCANNER", gst_scanner)
-                    }
-                }
-                if dir.starts_with("gdk-pixbuf-") {
-                    let mut is_loaders = false;
-                    let mut is_loaders_cache = false;
-                    for entry in WalkDir::new(dir_path).into_iter().flatten() {
-                        let path = entry.path();
-                        let name = entry.file_name().to_string_lossy();
-                        if name == "loaders" && path.is_dir() {
-                            env::set_var("GDK_PIXBUF_MODULEDIR", path);
-                            is_loaders = true
-                        }
-                        if name == "loaders.cache" && is_file(path) {
-                            env::set_var("GDK_PIXBUF_MODULE_FILE", path);
-                            is_loaders_cache = true
-                        }
-                        if is_loaders && is_loaders_cache {
-                            break
-                        }
-                    }
-                }
-                if dir == "ladspa" {
-                    env::set_var("LADSPA_PATH", dir_path)
-                }
-                if dir.starts_with("frei0r-") {
-                    env::set_var("FREI0R_PATH", dir_path)
-                }
-                if dir.starts_with("mlt-") {
-                    env::set_var("MLT_REPOSITORY", dir_path)
+    if !lib_path_data.is_empty() {
+        let dirs: std::collections::HashSet<&str> = lib_path_data.split("\n").map(|string|{
+            string.split("/").nth(1).unwrap_or("")
+        }).collect();
+        for dir in dirs {
+            let dir_path = &format!("{library_path}/{dir}");
+            if dir.starts_with("python") && !is_writable(&sharun_dir) {
+                env::set_var("PYTHONDONTWRITEBYTECODE", "1")
+            }
+            if dir.starts_with("perl") {
+                add_to_env("PERLLIB", dir_path)
+            }
+            if dir == "gconv" {
+                add_to_env("GCONV_PATH", dir_path)
+            }
+            if dir == "gio" {
+                let modules = &format!("{dir_path}/modules");
+                if Path::new(modules).exists() {
+                    env::set_var("GIO_MODULE_DIR", modules)
                 }
             }
+            if dir == "dri" {
+                env::set_var("LIBGL_DRIVERS_PATH", dir_path);
+                if get_env_var("SHARUN_NO_NVIDIA_EGL_PRIME") != "1" &&
+                    Path::new("/sys/module/nvidia/version").exists() {
+                        add_to_env("LIBVA_DRIVERS_PATH", "/run/opengl-driver/lib/dri");
+                        add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib/dri");
+                        add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib64/dri");
+                        #[cfg(target_arch = "x86_64")]
+                        add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib/x86_64-linux-gnu/dri");
+                        #[cfg(target_arch = "aarch64")]
+                        add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib/aarch64-linux-gnu/dri");
+                }
+                add_to_env("LIBVA_DRIVERS_PATH", dir_path)
+            }
+            if dir == "gbm" {
+                add_to_env("GBM_BACKENDS_PATH", "/run/opengl-driver/lib/gbm");
+                add_to_env("GBM_BACKENDS_PATH", "/usr/lib/gbm");
+                add_to_env("GBM_BACKENDS_PATH", "/usr/lib64/gbm");
+                #[cfg(target_arch = "x86_64")]
+                add_to_env("GBM_BACKENDS_PATH", "/usr/lib/x86_64-linux-gnu/gbm");
+                #[cfg(target_arch = "aarch64")]
+                add_to_env("GBM_BACKENDS_PATH", "/usr/lib/aarch64-linux-gnu/gbm");
+                add_to_env("GBM_BACKENDS_PATH", dir_path)
+            }
+            if dir == "libheif" {
+                let plugins = &format!("{dir_path}/plugins");
+                if Path::new(plugins).exists() {
+                    env::set_var("LIBHEIF_PLUGIN_PATH", plugins)
+                } else {
+                    env::set_var("LIBHEIF_PLUGIN_PATH", dir_path)
+                }
+            }
+            if dir == "xtables" {
+                env::set_var("XTABLES_LIBDIR", dir_path)
+            }
+            if dir.starts_with("spa-") {
+                env::set_var("SPA_PLUGIN_DIR", dir_path)
+            }
+            if dir.starts_with("pipewire-") {
+                env::set_var("PIPEWIRE_MODULE_DIR", dir_path)
+            }
+            if dir.starts_with("gtk-") {
+                add_to_env("GTK_PATH", dir_path);
+                env::set_var("GTK_EXE_PREFIX", &sharun_dir);
+                env::set_var("GTK_DATA_PREFIX", &sharun_dir);
+                for entry in WalkDir::new(dir_path).into_iter().flatten() {
+                    let path = entry.path();
+                    if is_file(path) && entry.file_name().to_string_lossy() == "immodules.cache" {
+                        env::set_var("GTK_IM_MODULE_FILE", path);
+                        break
+                    }
+                }
+            }
+            if dir == "folks" {
+                for entry in WalkDir::new(dir_path).into_iter().flatten() {
+                    let path = entry.path();
+                    if path.is_dir() && entry.file_name().to_string_lossy() == "backends" {
+                        env::set_var("FOLKS_BACKEND_PATH", path);
+                        break
+                    }
+                }
+            }
+            if dir.starts_with("qt") {
+                let qt_conf = &format!("{bin_dir}/qt.conf");
+                let plugins = &format!("{dir_path}/plugins");
+                if Path::new(plugins).exists() && ! Path::new(qt_conf).exists() {
+                    add_to_env("QT_PLUGIN_PATH", plugins)
+                }
+            }
+            if dir == "imlib2" {
+                let loaders = &format!("{dir_path}/loaders");
+                let filters = &format!("{dir_path}/filters");
+                if Path::new(loaders).exists() {
+                    env::set_var("IMLIB2_LOADER_PATH", loaders)
+                }
+                if Path::new(filters).exists() {
+                    env::set_var("IMLIB2_FILTER_PATH", filters)
+                }
+            }
+            if dir.starts_with("babl-") {
+                env::set_var("BABL_PATH", dir_path)
+            }
+            if dir.starts_with("gegl-") {
+                env::set_var("GEGL_PATH", dir_path)
+            }
+            if dir == "libdecor" {
+                let plugins = &format!("{dir_path}/plugins-1");
+                if Path::new(plugins).exists() {
+                    env::set_var("LIBDECOR_PLUGIN_DIR", plugins)
+                }
+            }
+            if dir.starts_with("tcl") && Path::new(&format!("{dir_path}/msgs")).exists() {
+                add_to_env("TCL_LIBRARY", dir_path);
+                let tk = &format!("{library_path}/{}", dir.replace("tcl", "tk"));
+                if Path::new(&tk).exists() {
+                    add_to_env("TK_LIBRARY", tk)
+                }
+            }
+            if dir.starts_with("gstreamer-") {
+                add_to_env("GST_PLUGIN_PATH", dir_path);
+                add_to_env("GST_PLUGIN_SYSTEM_PATH", dir_path);
+                add_to_env("GST_PLUGIN_SYSTEM_PATH_1_0", dir_path);
+                let gst_scanner = &format!("{dir_path}/gst-plugin-scanner");
+                if Path::new(gst_scanner).exists() {
+                    env::set_var("GST_PLUGIN_SCANNER", gst_scanner)
+                }
+            }
+            if dir.starts_with("gdk-pixbuf-") {
+                let mut is_loaders = false;
+                let mut is_loaders_cache = false;
+                for entry in WalkDir::new(dir_path).into_iter().flatten() {
+                    let path = entry.path();
+                    let name = entry.file_name().to_string_lossy();
+                    if name == "loaders" && path.is_dir() {
+                        env::set_var("GDK_PIXBUF_MODULEDIR", path);
+                        is_loaders = true
+                    }
+                    if name == "loaders.cache" && is_file(path) {
+                        env::set_var("GDK_PIXBUF_MODULE_FILE", path);
+                        is_loaders_cache = true
+                    }
+                    if is_loaders && is_loaders_cache {
+                        break
+                    }
+                }
+            }
+            if dir == "ladspa" {
+                env::set_var("LADSPA_PATH", dir_path)
+            }
+            if dir.starts_with("frei0r-") {
+                env::set_var("FREI0R_PATH", dir_path)
+            }
+            if dir.starts_with("mlt-") {
+                env::set_var("MLT_REPOSITORY", dir_path)
+            }
         }
+    }
 
-        let share_dir = PathBuf::from(format!("{sharun_dir}/share"));
-        if share_dir.exists() {
-            if let Ok(dir) = share_dir.read_dir() {
-                add_to_env("XDG_DATA_DIRS", "/etc");
-                add_to_env("XDG_DATA_DIRS", "/run/current-system/sw/share");
-                add_to_env("XDG_DATA_DIRS", "/run/opengl-driver/share");
-                add_to_env("XDG_DATA_DIRS", "/usr/share");
-                add_to_env("XDG_DATA_DIRS", "/usr/local/share");
-                add_to_env("XDG_DATA_DIRS", format!("{}/.local/share", get_env_var("HOME")));
-                add_to_env("XDG_DATA_DIRS", &share_dir);
-                let xdg_data_dirs = &get_env_var("XDG_DATA_DIRS");
-                for entry in dir.flatten() {
-                    let entry_path = entry.path();
-                    if entry_path.is_dir() {
-                        let name = entry.file_name();
-                        match name.to_str().unwrap_or_default() {
-                            "glvnd" => {
-                                if get_env_var("SHARUN_NO_NVIDIA_EGL_PRIME") != "1" &&
-                                   Path::new("/sys/module/nvidia/version").exists() &&
-                                   get_env_var("__EGL_VENDOR_LIBRARY_FILENAMES").is_empty() {
-                                   let mut xdg_json_paths = Vec::new();
-                                   for xdg_data_dir in xdg_data_dirs.split(":") {
-                                       let egl_vendor = Path::new(xdg_data_dir).join("glvnd/egl_vendor.d");
-                                       let mut paths = collect_json_files(&egl_vendor);
-                                       xdg_json_paths.append(&mut paths)
+    let share_dir = PathBuf::from(format!("{sharun_dir}/share"));
+    if share_dir.exists() {
+        if let Ok(dir) = share_dir.read_dir() {
+            add_to_env("XDG_DATA_DIRS", "/etc");
+            add_to_env("XDG_DATA_DIRS", "/run/current-system/sw/share");
+            add_to_env("XDG_DATA_DIRS", "/run/opengl-driver/share");
+            add_to_env("XDG_DATA_DIRS", "/usr/share");
+            add_to_env("XDG_DATA_DIRS", "/usr/local/share");
+            add_to_env("XDG_DATA_DIRS", format!("{}/.local/share", get_env_var("HOME")));
+            add_to_env("XDG_DATA_DIRS", &share_dir);
+            let xdg_data_dirs = &get_env_var("XDG_DATA_DIRS");
+            for entry in dir.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    let name = entry.file_name();
+                    match name.to_str().unwrap_or_default() {
+                        "glvnd" => {
+                            if get_env_var("SHARUN_NO_NVIDIA_EGL_PRIME") != "1" &&
+                               Path::new("/sys/module/nvidia/version").exists() &&
+                               get_env_var("__EGL_VENDOR_LIBRARY_FILENAMES").is_empty() {
+                               let mut xdg_json_paths = Vec::new();
+                               for xdg_data_dir in xdg_data_dirs.split(":") {
+                                   let egl_vendor = Path::new(xdg_data_dir).join("glvnd/egl_vendor.d");
+                                   let mut paths = collect_json_files(&egl_vendor);
+                                   xdg_json_paths.append(&mut paths)
+                               }
+                               let nvidia_json = xdg_json_paths.iter()
+                                   .find(|p| p.file_name().unwrap_or_default().to_string_lossy().contains("nvidia"));
+                               if let Some(nvidia_path) = nvidia_json {
+                                   let mut all_paths = Vec::new();
+                                   all_paths.push(nvidia_path.clone());
+                                   for path in xdg_json_paths.iter() {
+                                       if !path.file_name().unwrap_or_default().to_string_lossy().contains("nvidia") {
+                                           all_paths.push(path.clone())
+                                       }
                                    }
-                                   let nvidia_json = xdg_json_paths.iter()
-                                       .find(|p| p.file_name().unwrap_or_default().to_string_lossy().contains("nvidia"));
-                                   if let Some(nvidia_path) = nvidia_json {
-                                       let mut all_paths = Vec::new();
-                                       all_paths.push(nvidia_path.clone());
-                                       for path in xdg_json_paths.iter() {
-                                           if !path.file_name().unwrap_or_default().to_string_lossy().contains("nvidia") {
-                                               all_paths.push(path.clone())
-                                           }
-                                       }
-                                       if !all_paths.is_empty() {
-                                           let paths_str = all_paths.iter()
-                                               .map(|p| p.to_string_lossy())
-                                               .collect::<Vec<_>>()
-                                               .join(":");
-                                           env::set_var("__EGL_VENDOR_LIBRARY_FILENAMES", &paths_str)
-                                       }
+                                   if !all_paths.is_empty() {
+                                       let paths_str = all_paths.iter()
+                                           .map(|p| p.to_string_lossy())
+                                           .collect::<Vec<_>>()
+                                           .join(":");
+                                       env::set_var("__EGL_VENDOR_LIBRARY_FILENAMES", &paths_str)
                                    }
                                }
-                                add_to_xdg_data_env(xdg_data_dirs,
-                                    "__EGL_VENDOR_LIBRARY_DIRS", "glvnd/egl_vendor.d")
-                            }
-                            "vulkan" => {
-                                let vk_dir = "vulkan/icd.d";
-                                let vk_env = "VK_DRIVER_FILES";
-                                if get_env_var("SHARUN_ALLOW_SYS_VKICD") == "1" {
-                                    env::remove_var("SHARUN_ALLOW_SYS_VKICD");
-                                    add_to_xdg_data_env(xdg_data_dirs, vk_env, vk_dir)
-                                } else {
-                                    for xdg_data_dir in xdg_data_dirs.rsplit(":") {
-                                        let vk_icd_dir = Path::new(xdg_data_dir).join(vk_dir);
-                                        if vk_icd_dir.exists() {
-                                            if xdg_data_dir.starts_with(share_dir.to_str().unwrap_or_default()) {
-                                                add_to_env(vk_env, vk_icd_dir);
-                                            } else if let Ok(dir) = vk_icd_dir.read_dir() {
-                                                for entry in dir.flatten() {
-                                                    let path = entry.path();
-                                                    if is_file(&path) &&
-                                                        entry.file_name().to_string_lossy().contains("nvidia") {
-                                                        add_to_env(vk_env, path)
-                                                    }
+                           }
+                            add_to_xdg_data_env(xdg_data_dirs,
+                                "__EGL_VENDOR_LIBRARY_DIRS", "glvnd/egl_vendor.d")
+                        }
+                        "vulkan" => {
+                            let vk_dir = "vulkan/icd.d";
+                            let vk_env = "VK_DRIVER_FILES";
+                            if get_env_var("SHARUN_ALLOW_SYS_VKICD") == "1" {
+                                env::remove_var("SHARUN_ALLOW_SYS_VKICD");
+                                add_to_xdg_data_env(xdg_data_dirs, vk_env, vk_dir)
+                            } else {
+                                for xdg_data_dir in xdg_data_dirs.rsplit(":") {
+                                    let vk_icd_dir = Path::new(xdg_data_dir).join(vk_dir);
+                                    if vk_icd_dir.exists() {
+                                        if xdg_data_dir.starts_with(share_dir.to_str().unwrap_or_default()) {
+                                            add_to_env(vk_env, vk_icd_dir);
+                                        } else if let Ok(dir) = vk_icd_dir.read_dir() {
+                                            for entry in dir.flatten() {
+                                                let path = entry.path();
+                                                if is_file(&path) &&
+                                                    entry.file_name().to_string_lossy().contains("nvidia") {
+                                                    add_to_env(vk_env, path)
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                            "alsa" => {
-                                let alsa_conf = entry_path.join("alsa.conf");
-                                if !Path::new("/usr/share/alsa/alsa.conf").exists() && alsa_conf.exists() {
-                                    env::set_var("ALSA_CONFIG_PATH", alsa_conf)
-                                }
-                            }
-                            "drirc.d" => {
-                                let sys_drirc_dir = Path::new("/usr/share/drirc.d");
-                                if !sys_drirc_dir.exists() {
-                                    env::set_var("DRIRC_CONFIGDIR", entry_path)
-                                }
-                            }
-                            "X11" => {
-                                let xkb = &entry_path.join("xkb");
-                                if !Path::new("/usr/share/X11/xkb").exists() && xkb.exists() {
-                                    env::set_var("XKB_CONFIG_ROOT", xkb);
-                                    env::set_var("QT_XKB_CONFIG_ROOT", xkb)
-                                }
-                                let xlocale = &entry_path.join("locale");
-                                if !Path::new("/usr/share/X11/locale").exists() && xlocale.exists() {
-                                    env::set_var("XLOCALEDIR", xlocale)
-                                }
-                            }
-                            "libdrm" => {
-                                add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", entry_path);
-                                add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", "/usr/share/libdrm");
-                                add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", "/usr/local/share/libdrm")
-                            }
-                            "libthai" => {
-                                if entry_path.join("thbrk.tri").exists() {
-                                    env::set_var("LIBTHAI_DICTDIR", entry_path)
-                                }
-                            }
-                            "glib-2.0" => {
-                                add_to_xdg_data_env(xdg_data_dirs,
-                                    "GSETTINGS_SCHEMA_DIR", "glib-2.0/schemas")
-                            }
-                            "terminfo" => {
-                                env::set_var("TERMINFO", entry_path)
-                            }
-                            "locale" => {
-                                env::set_var("TEXTDOMAINDIR", entry_path)
-                            }
-                            "file" => {
-                                let magic_file = &entry_path.join("misc/magic.mgc");
-                                if magic_file.exists() {
-                                    env::set_var("MAGIC", magic_file)
-                                }
-                            }
-                            "ghostscript" => {
-                                let mut gs_base: Option<PathBuf> = None;
-                                if let Ok(gs_dir) = entry_path.read_dir() {
-                                    for gs_entry in gs_dir.flatten() {
-                                        let gs_init = gs_entry.path().join("Resource").join("Init");
-                                        if gs_init.is_dir() {
-                                            gs_base = Some(gs_entry.path().join("Resource"));
-                                            break
-                                        }
-                                    }
-                                }
-                                if gs_base.is_none() {
-                                    let gs_unversioned = entry_path.join("Resource").join("Init");
-                                    if gs_unversioned.is_dir() {
-                                        gs_base = Some(entry_path.join("Resource"))
-                                    }
-                                }
-                                if let Some(base) = gs_base {
-                                    env::set_var("GS_LIB", format!("{}:{}",
-                                        base.join("Init").to_string_lossy(),
-                                        base.to_string_lossy()))
-                                }
-                            }
-                            mlt if mlt.starts_with("mlt-") => {
-                                let profiles = entry_path.join("profiles");
-                                let presets = entry_path.join("presets");
-                                if profiles.exists() {
-                                    env::set_var("MLT_PROFILES_PATH", profiles)
-                                }
-                                if presets.exists() {
-                                    env::set_var("MLT_PRESETS_PATH", presets)
-                                }
-                            }
-                            _ => {}
                         }
+                        "alsa" => {
+                            let alsa_conf = entry_path.join("alsa.conf");
+                            if !Path::new("/usr/share/alsa/alsa.conf").exists() && alsa_conf.exists() {
+                                env::set_var("ALSA_CONFIG_PATH", alsa_conf)
+                            }
+                        }
+                        "drirc.d" => {
+                            let sys_drirc_dir = Path::new("/usr/share/drirc.d");
+                            if !sys_drirc_dir.exists() {
+                                env::set_var("DRIRC_CONFIGDIR", entry_path)
+                            }
+                        }
+                        "X11" => {
+                            let xkb = &entry_path.join("xkb");
+                            if !Path::new("/usr/share/X11/xkb").exists() && xkb.exists() {
+                                env::set_var("XKB_CONFIG_ROOT", xkb);
+                                env::set_var("QT_XKB_CONFIG_ROOT", xkb)
+                            }
+                            let xlocale = &entry_path.join("locale");
+                            if !Path::new("/usr/share/X11/locale").exists() && xlocale.exists() {
+                                env::set_var("XLOCALEDIR", xlocale)
+                            }
+                        }
+                        "libdrm" => {
+                            add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", entry_path);
+                            add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", "/usr/share/libdrm");
+                            add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", "/usr/local/share/libdrm")
+                        }
+                        "libthai" => {
+                            if entry_path.join("thbrk.tri").exists() {
+                                env::set_var("LIBTHAI_DICTDIR", entry_path)
+                            }
+                        }
+                        "glib-2.0" => {
+                            add_to_xdg_data_env(xdg_data_dirs,
+                                "GSETTINGS_SCHEMA_DIR", "glib-2.0/schemas")
+                        }
+                        "terminfo" => {
+                            env::set_var("TERMINFO", entry_path)
+                        }
+                        "locale" => {
+                            env::set_var("TEXTDOMAINDIR", entry_path)
+                        }
+                        "file" => {
+                            let magic_file = &entry_path.join("misc/magic.mgc");
+                            if magic_file.exists() {
+                                env::set_var("MAGIC", magic_file)
+                            }
+                        }
+                        "ghostscript" => {
+                            let mut gs_base: Option<PathBuf> = None;
+                            if let Ok(gs_dir) = entry_path.read_dir() {
+                                for gs_entry in gs_dir.flatten() {
+                                    let gs_init = gs_entry.path().join("Resource").join("Init");
+                                    if gs_init.is_dir() {
+                                        gs_base = Some(gs_entry.path().join("Resource"));
+                                        break
+                                    }
+                                }
+                            }
+                            if gs_base.is_none() {
+                                let gs_unversioned = entry_path.join("Resource").join("Init");
+                                if gs_unversioned.is_dir() {
+                                    gs_base = Some(entry_path.join("Resource"))
+                                }
+                            }
+                            if let Some(base) = gs_base {
+                                env::set_var("GS_LIB", format!("{}:{}",
+                                    base.join("Init").to_string_lossy(),
+                                    base.to_string_lossy()))
+                            }
+                        }
+                        mlt if mlt.starts_with("mlt-") => {
+                            let profiles = entry_path.join("profiles");
+                            let presets = entry_path.join("presets");
+                            if profiles.exists() {
+                                env::set_var("MLT_PROFILES_PATH", profiles)
+                            }
+                            if presets.exists() {
+                                env::set_var("MLT_PRESETS_PATH", presets)
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
         }
+    }
 
-        let etc_dir = PathBuf::from(format!("{sharun_dir}/etc"));
-        if etc_dir.exists() {
-            if let Ok(dir) = etc_dir.read_dir() {
-                for entry in dir.flatten() {
-                    let entry_path = entry.path();
-                    if entry_path.is_dir() {
-                        let name = entry.file_name();
-                        match name.to_str().unwrap_or_default() {
-                            "fonts" => {
-                                let fonts_conf = entry_path.join("fonts.conf");
-                                if !Path::new("/etc/fonts/fonts.conf").exists() && fonts_conf.exists() {
-                                    env::set_var("FONTCONFIG_FILE", fonts_conf)
-                                }
+    let etc_dir = PathBuf::from(format!("{sharun_dir}/etc"));
+    if etc_dir.exists() {
+        if let Ok(dir) = etc_dir.read_dir() {
+            for entry in dir.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    let name = entry.file_name();
+                    match name.to_str().unwrap_or_default() {
+                        "fonts" => {
+                            let fonts_conf = entry_path.join("fonts.conf");
+                            if !Path::new("/etc/fonts/fonts.conf").exists() && fonts_conf.exists() {
+                                env::set_var("FONTCONFIG_FILE", fonts_conf)
                             }
-                            "ssl" => {
-                                let openssl_conf = entry_path.join("openssl.cnf");
-                                if openssl_conf.exists() {
-                                    env::set_var("OPENSSL_CONF", openssl_conf)
-                                }
-                            }
-                            _ => {}
                         }
+                        "ssl" => {
+                            let openssl_conf = entry_path.join("openssl.cnf");
+                            if openssl_conf.exists() {
+                                env::set_var("OPENSSL_CONF", openssl_conf)
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
         }
+    }
 
-        if !Path::new("/etc/ssl/certs/ca-certificates.crt").exists() {
-            let possible_certs = [
-                "/etc/pki/tls/cert.pem",
-                "/etc/pki/tls/cacert.pem",
-                "/etc/ssl/cert.pem",
-                "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
-                "/var/lib/ca-certificates/ca-bundle.pem",
-            ];
+    if !Path::new("/etc/ssl/certs/ca-certificates.crt").exists() {
+        let possible_certs = [
+            "/etc/pki/tls/cert.pem",
+            "/etc/pki/tls/cacert.pem",
+            "/etc/ssl/cert.pem",
+            "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+            "/var/lib/ca-certificates/ca-bundle.pem",
+        ];
 
-            if let Some(found_cert) = possible_certs.iter().find(|&&path| Path::new(path).exists()) {
-                for var_name in ["REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"].iter() {
-                    if env::var_os(var_name).is_none() {
-                        env::set_var(var_name, found_cert);
-                    }
+        if let Some(found_cert) = possible_certs.iter().find(|&&path| Path::new(path).exists()) {
+            for var_name in ["REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"].iter() {
+                if env::var_os(var_name).is_none() {
+                    env::set_var(var_name, found_cert);
                 }
-            } else {
-                eprintln!("WARNING: Cannot find CA Certificates in host!");
             }
+        } else {
+            eprintln!("WARNING: Cannot find CA Certificates in host!");
         }
     }
 
@@ -1172,15 +1111,8 @@ fn main() {
         }
     }
 
-    cfg_if! {
-        if #[cfg(feature = "pyinstaller")] {
-            let is_pyinstaller_elf = is_elf_section(&elf_bytes, "pydata").unwrap_or(false);
-            let is_pyinstaller_dir = Path::new(&shared_bin).join("_internal").exists();
-        } else {
-            let is_pyinstaller_elf = false;
-            let is_pyinstaller_dir = false;
-        }
-    }
+    let is_pyinstaller_elf = is_elf_section(&elf_bytes, "pydata").unwrap_or(false);
+    let is_pyinstaller_dir = Path::new(&shared_bin).join("_internal").exists();
 
     let mut interpreter_args: Vec<CString> = Vec::new();
     if !is_pyinstaller_elf || is_pyinstaller_dir || is_elf32_bin {
@@ -1230,11 +1162,7 @@ fn main() {
                 .args(interpreter_args)
                 .exec()
         } else {
-            set_interp(elf_bytes, &bin, interpreter.to_str().unwrap_or_default())
-                .unwrap_or_else(|err|{
-                    eprintln!("Failed to set ELF interpreter: {}: {err}", &bin);
-                    exit(1)
-            });
+            drop(elf_bytes);
             Command::new(&bin)
                 .args(exec_args)
                 .exec()
