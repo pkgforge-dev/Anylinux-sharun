@@ -1113,6 +1113,7 @@ fn main() {
 
     let is_pyinstaller_elf = is_elf_section(&elf_bytes, "pydata").unwrap_or(false);
     let is_pyinstaller_dir = Path::new(&shared_bin).join("_internal").exists();
+    let is_bun_elf = is_elf_section(&elf_bytes, ".bun").unwrap_or(false);
 
     let mut interpreter_args: Vec<CString> = Vec::new();
     if !is_pyinstaller_elf || is_pyinstaller_dir || is_elf32_bin {
@@ -1153,8 +1154,8 @@ fn main() {
         }
     }
 
-    if is_pyinstaller_elf || is_elf32_bin {
-        let err = if is_pyinstaller_dir || (!is_pyinstaller_elf && is_elf32_bin) {
+    if is_pyinstaller_elf || is_bun_elf || is_elf32_bin {
+        let err = if is_pyinstaller_dir || (!is_pyinstaller_elf && !is_bun_elf && is_elf32_bin) {
             drop(elf_bytes);
             let interpreter_args: Vec<String> = interpreter_args.iter()
                 .map(|s| s.clone().into_string().unwrap_or_default()).skip(1).collect();
