@@ -23,8 +23,6 @@ opt-level = 0
 [dependencies]
 goblin = "0.8.2"
 walkdir = "2.5.0"
-flate2 = "1.1.9"
 userland-execve = "0.2.0"
-include_file_compress = "0.1.3"
 nix = { version = "0.31.1", features = [ "fs" ] }
 dotenv = { git = "https://github.com/VHSgunzo/dotenv.git" }

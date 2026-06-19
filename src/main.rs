@@ -365,13 +365,11 @@ fn print_usage() {
 
 [ Usage ]: {SHARUN_NAME} [OPTIONS] [EXEC ARGS]...",
     env!("CARGO_PKG_DESCRIPTION"));
-    println!("     Use lib4bin for create 'bin' and 'shared' dirs");
     println!("
 [ Arguments ]:
     [EXEC ARGS]...              Command line arguments for execution
 
 [ Options ]:");
-    println!("     l,  lib4bin [ARGS]         Launch the built-in lib4bin");
     println!("    -g,  --gen-lib-path         Generate a lib.path file
     -v,  --version              Print version
     -h,  --help                 Print help
@@ -472,37 +470,6 @@ fn main() {
                         }
                     }
                     return
-                }
-                "l" | "lib4bin" => {
-                    let lib4bin_compressed = include_file_compress::include_file_compress_deflate!("lib4bin", 9);
-                    let mut decoder = flate2::read::DeflateDecoder::new(&lib4bin_compressed[..]);
-                    let mut lib4bin = Vec::new();
-                    decoder.read_to_end(&mut lib4bin).unwrap_or_default();
-                    drop(decoder);
-                    exec_args.remove(0);
-                    add_to_env("PATH", bin_dir);
-                    let cmd = Command::new("bash")
-                        .env("SHARUN", sharun)
-                        .stdin(std::process::Stdio::piped())
-                        .arg("-s").arg("--")
-                        .args(exec_args)
-                        .spawn();
-                    match cmd {
-                        Ok(mut bash) => {
-                            bash.stdin.take().unwrap_or_else(||{
-                                eprintln!("Failed to take bash stdin!");
-                                exit(1)
-                            }).write_all(&lib4bin).unwrap_or_else(|err|{
-                                eprintln!("Failed to write lib4bin to bash stdin: {err}");
-                                exit(1)
-                            });
-                            exit(bash.wait().unwrap_or_default().code().unwrap_or_default())
-                        }
-                        Err(err) => {
-                            eprintln!("Failed to run bash: {err}");
-                            exit(1)
-                        }
-                    }
                 }
                 _ => {
                     bin_name = exec_args.remove(0);
