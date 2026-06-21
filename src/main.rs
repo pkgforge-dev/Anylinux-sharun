@@ -437,7 +437,7 @@ fn main() {
             }
     });
 
-    let arg0_path = arg0_dir.join(arg0_name);
+    let mut arg0_path = arg0_dir.join(arg0_name);
     let arg0_full_path = arg0_path.canonicalize().unwrap_or_default();
     let arg0_full_path_name = arg0_full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
     let mut bin_name = if arg0_path.is_symlink() &&
@@ -479,11 +479,7 @@ fn main() {
                         if bin_path.is_symlink() && Path::new(&shared_bin).join(&bin_full_path_name).exists() {
                             bin_name = bin_full_path_name
                         }
-                        if is_exe(&bin_full_path) &&
-                            (is_hardlink(&sharun, &bin_full_path) ||
-                            !Path::new(&shared_bin).join(&bin_name).exists() ||
-                            bin_full_path != sharun)
-                        {
+                        if is_exe(&bin_full_path) {
                             add_to_env("PATH", bin_dir);
                             match is_script(&bin_path) {
                                 Ok(true) => {
@@ -492,12 +488,16 @@ fn main() {
                                         exit(1);
                                     }
                                 }
-                                Ok(false) => {
+                                Ok(false) if is_hardlink(&sharun, &bin_full_path) => {
                                     let err = Command::new(&bin_path)
                                         .args(exec_args)
                                         .exec();
                                     eprintln!("Error executing file {:?}: {err}", &bin_path);
                                     exit(1)
+                                }
+                                Ok(false) => {
+                                    bin_name = bin_full_path.to_string_lossy().to_string();
+                                    arg0_path = bin_full_path.clone()
                                 }
                                 Err(err) => {
                                     eprintln!("Error reading file {:?}: {err}", &bin_path);
@@ -592,7 +592,25 @@ fn main() {
         eprintln!("Failed to run App: {app}: {err}");
         exit(1)
     }
-    let bin = format!("{shared_bin}/{bin_name}");
+    let mut bin = if Path::new(&bin_name).is_absolute() {
+        bin_name.clone()
+    } else {
+        format!("{shared_bin}/{bin_name}")
+    };
+
+    if !Path::new(&bin).exists() && !Path::new(&bin_name).is_absolute() {
+        if let Ok(true) = is_script(&PathBuf::from(&bin_name)) {
+            let err = Command::new(&bin_name).args(exec_args).exec();
+            eprintln!("Failed to exec script {bin_name}: {err}");
+            exit(1)
+        }
+        if let Some(path) = which(&bin_name) {
+            bin = path.to_string_lossy().to_string()
+        } else {
+            eprintln!("Failed to find '{bin_name}' in PATH or '{shared_bin}'");
+            exit(1)
+        }
+    }
 
     let is_elf32_bin = is_elf32(&bin).unwrap_or_else(|err|{
         eprintln!("Failed to check ELF class: {bin}: {err}");
