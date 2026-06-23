@@ -2,10 +2,10 @@ cargo-features = ["panic-immediate-abort"]
 
 [package]
 name = "sharun"
-version = "1.0.0"
+version = "2.0.0"
 readme = "README.md"
 license = "MIT"
-repository = "https://github.com/VHSgunzo/sharun"
+repository = "https://github.com/pkgforge-dev/Anylinux-sharun"
 description = "Run dynamically linked ELF binaries everywhere"
 edition = "2021"
 
@@ -25,4 +25,3 @@ goblin = "0.8.2"
 walkdir = "2.5.0"
 userland-execve = "0.2.0"
 nix = { version = "0.31.1", features = [ "fs" ] }
-dotenv = { git = "https://github.com/VHSgunzo/dotenv.git" }
