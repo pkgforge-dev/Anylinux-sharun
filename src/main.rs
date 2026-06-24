@@ -42,6 +42,11 @@ fn print_usage() {
 	SHARUN_LDNAME=ld.so            Specifies the name of the interpreter
 	SHARUN_EXTRA_LIBRARY_PATH      Extra library directories with highest priority
 	SHARUN_FALLBACK_LIBRARY_PATH   Fallback library directories with lowest priority
+	SHARUN_MESA_PATH=/path         External mesa install dir (with lib/ and share/)
+	                                to source graphics env vars and libraries from
+	                                DO NOT SET THIS VARIABLE TO '/usr'!
+	                                It needs to be set a directory that contains
+	                                a mesa installation only, no other libraries!
 	SHARUN_DIR                     Sharun directory");
 }
 
@@ -244,7 +249,22 @@ fn main() {
 		env::remove_var("SHARUN_WORKING_DIR")
 	}
 
-	let mut lib_path_data = set_appdir_env::setup(bin_dir, &library_path, &sharun_dir);
+	let mesa_path = get_env_var("SHARUN_MESA_PATH");
+	let (mesa_share, mesa_lib): (Option<String>, Option<String>) = if !mesa_path.is_empty() {
+		if Path::new(&mesa_path).is_dir() {
+			let share = format!("{mesa_path}/share");
+			let lib = format!("{mesa_path}/lib");
+			env::remove_var("SHARUN_MESA_PATH");
+			(Some(share), Some(lib))
+		} else {
+			eprintln!("WARNING: SHARUN_MESA_PATH points to an invalid location: '{mesa_path}'");
+			(None, None)
+		}
+	} else {
+		(None, None)
+	};
+
+	let mut lib_path_data = set_appdir_env::setup(bin_dir, &library_path, &sharun_dir, mesa_share.as_deref());
 
 	if !lib_path_data.is_empty() {
 		lib_path_data = lib_path_data.trim().into();
@@ -258,6 +278,12 @@ fn main() {
 	let ld_library_path_env = &get_env_var("LD_LIBRARY_PATH");
 	if !ld_library_path_env.is_empty() {
 		library_path += &format!(":{ld_library_path_env}")
+	}
+
+	if let Some(ml) = &mesa_lib {
+		if Path::new(ml).is_dir() {
+			library_path = format!("{}:{}", ml, library_path);
+		}
 	}
 
 	let extra_library_path = get_env_var("SHARUN_EXTRA_LIBRARY_PATH");

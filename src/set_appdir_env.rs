@@ -12,9 +12,10 @@ pub fn setup(
 	bin_dir: &str,
 	library_path: &str,
 	sharun_dir: &str,
+	mesa_share: Option<&str>,
 ) -> String {
 	let lib_path_data = set_lib_env(bin_dir, library_path, sharun_dir);
-	set_share_env(sharun_dir);
+	set_share_env(sharun_dir, mesa_share);
 	set_etc_env(sharun_dir);
 	lib_path_data
 }
@@ -221,165 +222,194 @@ fn set_lib_env(
 	lib_path_data
 }
 
-fn set_share_env(sharun_dir: &str) {
+fn set_share_env(sharun_dir: &str, mesa_share: Option<&str>) {
 	let share_dir = PathBuf::from(format!("{sharun_dir}/share"));
-	if !share_dir.exists() {
-		return;
-	}
-	if let Ok(dir) = share_dir.read_dir() {
+	let mesa_share_dir = mesa_share.and_then(|p| {
+		if Path::new(p).is_dir() { Some(PathBuf::from(p)) } else { None }
+	});
+	let using_mesa = mesa_share_dir.is_some();
+	let graphics_share = mesa_share_dir.unwrap_or_else(|| share_dir.clone());
+	let graphics_share_str = graphics_share.to_string_lossy().to_string();
+	let share_exists = share_dir.exists();
+
+	if share_exists || using_mesa {
 		add_to_env("XDG_DATA_DIRS", "/etc");
 		add_to_env("XDG_DATA_DIRS", "/run/current-system/sw/share");
 		add_to_env("XDG_DATA_DIRS", "/run/opengl-driver/share");
 		add_to_env("XDG_DATA_DIRS", "/usr/share");
 		add_to_env("XDG_DATA_DIRS", "/usr/local/share");
 		add_to_env("XDG_DATA_DIRS", format!("{}/.local/share", get_env_var("HOME")));
-		add_to_env("XDG_DATA_DIRS", &share_dir);
-		let xdg_data_dirs = &get_env_var("XDG_DATA_DIRS");
-		for entry in dir.flatten() {
-			let entry_path = entry.path();
-			if entry_path.is_dir() {
-				let name = entry.file_name();
-				match name.to_str().unwrap_or_default() {
-					"glvnd" => {
-						if get_env_var("SHARUN_NO_NVIDIA_EGL_PRIME") != "1" &&
-						   Path::new("/sys/module/nvidia/version").exists() &&
-						   get_env_var("__EGL_VENDOR_LIBRARY_FILENAMES").is_empty() {
-						   let mut xdg_json_paths = Vec::new();
-						   for xdg_data_dir in xdg_data_dirs.split(":") {
-							   let egl_vendor = Path::new(xdg_data_dir).join("glvnd/egl_vendor.d");
-							   let mut paths = collect_json_files(&egl_vendor);
-							   xdg_json_paths.append(&mut paths)
-						   }
-						   let nvidia_json = xdg_json_paths.iter()
-							   .find(|p| p.file_name().unwrap_or_default().to_string_lossy().contains("nvidia"));
-						   if let Some(nvidia_path) = nvidia_json {
-							   let mut all_paths = Vec::new();
-							   all_paths.push(nvidia_path.clone());
-							   for path in xdg_json_paths.iter() {
-								   if !path.file_name().unwrap_or_default().to_string_lossy().contains("nvidia") {
-									   all_paths.push(path.clone())
+		if share_exists {
+			add_to_env("XDG_DATA_DIRS", &share_dir);
+		}
+		if using_mesa {
+			add_to_env("XDG_DATA_DIRS", &graphics_share_str);
+		}
+	}
+	let xdg_data_dirs = &get_env_var("XDG_DATA_DIRS");
+
+	if share_exists {
+		if let Ok(dir) = share_dir.read_dir() {
+			for entry in dir.flatten() {
+				let entry_path = entry.path();
+				if entry_path.is_dir() {
+					let name = entry.file_name();
+					match name.to_str().unwrap_or_default() {
+						"alsa" => {
+							let alsa_conf = entry_path.join("alsa.conf");
+							if !Path::new("/usr/share/alsa/alsa.conf").exists() && alsa_conf.exists() {
+								env::set_var("ALSA_CONFIG_PATH", alsa_conf)
+							}
+						}
+						"X11" => {
+							let xkb = &entry_path.join("xkb");
+							if !Path::new("/usr/share/X11/xkb").exists() && xkb.exists() {
+								env::set_var("XKB_CONFIG_ROOT", xkb);
+								env::set_var("QT_XKB_CONFIG_ROOT", xkb)
+							}
+							let xlocale = &entry_path.join("locale");
+							if !Path::new("/usr/share/X11/locale").exists() && xlocale.exists() {
+								env::set_var("XLOCALEDIR", xlocale)
+							}
+						}
+						"libthai" => {
+							if entry_path.join("thbrk.tri").exists() {
+								env::set_var("LIBTHAI_DICTDIR", entry_path)
+							}
+						}
+						"glib-2.0" => {
+							add_to_xdg_data_env(xdg_data_dirs,
+								"GSETTINGS_SCHEMA_DIR", "glib-2.0/schemas")
+						}
+						"terminfo" => {
+							env::set_var("TERMINFO", entry_path)
+						}
+						"locale" => {
+							env::set_var("TEXTDOMAINDIR", entry_path)
+						}
+						"file" => {
+							let magic_file = &entry_path.join("misc/magic.mgc");
+							if magic_file.exists() {
+								env::set_var("MAGIC", magic_file)
+							}
+						}
+						"ghostscript" => {
+							let mut gs_base: Option<PathBuf> = None;
+							if let Ok(gs_dir) = entry_path.read_dir() {
+								for gs_entry in gs_dir.flatten() {
+									let gs_init = gs_entry.path().join("Resource").join("Init");
+									if gs_init.is_dir() {
+										gs_base = Some(gs_entry.path().join("Resource"));
+										break
+									}
+								}
+							}
+							if gs_base.is_none() {
+								let gs_unversioned = entry_path.join("Resource").join("Init");
+								if gs_unversioned.is_dir() {
+									gs_base = Some(entry_path.join("Resource"))
+								}
+							}
+							if let Some(base) = gs_base {
+								env::set_var("GS_LIB", format!("{}:{}",
+									base.join("Init").to_string_lossy(),
+									base.to_string_lossy()))
+							}
+						}
+						mlt if mlt.starts_with("mlt-") => {
+							let profiles = entry_path.join("profiles");
+							let presets = entry_path.join("presets");
+							if profiles.exists() {
+								env::set_var("MLT_PROFILES_PATH", profiles)
+							}
+							if presets.exists() {
+								env::set_var("MLT_PRESETS_PATH", presets)
+							}
+						}
+						_ => {}
+					}
+				}
+			}
+		}
+	}
+
+	if graphics_share.exists() {
+		if let Ok(dir) = graphics_share.read_dir() {
+			for entry in dir.flatten() {
+				let entry_path = entry.path();
+				if entry_path.is_dir() {
+					let name = entry.file_name();
+					match name.to_str().unwrap_or_default() {
+						"glvnd" => {
+							if get_env_var("SHARUN_NO_NVIDIA_EGL_PRIME") != "1" &&
+							   Path::new("/sys/module/nvidia/version").exists() &&
+							   get_env_var("__EGL_VENDOR_LIBRARY_FILENAMES").is_empty() {
+							   let mut xdg_json_paths = Vec::new();
+							   for xdg_data_dir in xdg_data_dirs.split(":") {
+								   let egl_vendor = Path::new(xdg_data_dir).join("glvnd/egl_vendor.d");
+								   let mut paths = collect_json_files(&egl_vendor);
+								   xdg_json_paths.append(&mut paths)
+							   }
+							   let nvidia_json = xdg_json_paths.iter()
+								   .find(|p| p.file_name().unwrap_or_default().to_string_lossy().contains("nvidia"));
+							   if let Some(nvidia_path) = nvidia_json {
+								   let mut all_paths = Vec::new();
+								   all_paths.push(nvidia_path.clone());
+								   for path in xdg_json_paths.iter() {
+									   if !path.file_name().unwrap_or_default().to_string_lossy().contains("nvidia") {
+										   all_paths.push(path.clone())
+									   }
+								   }
+								   if !all_paths.is_empty() {
+									   let paths_str = all_paths.iter()
+										   .map(|p| p.to_string_lossy())
+										   .collect::<Vec<_>>()
+										   .join(":");
+									   env::set_var("__EGL_VENDOR_LIBRARY_FILENAMES", &paths_str)
 								   }
 							   }
-							   if !all_paths.is_empty() {
-								   let paths_str = all_paths.iter()
-									   .map(|p| p.to_string_lossy())
-									   .collect::<Vec<_>>()
-									   .join(":");
-								   env::set_var("__EGL_VENDOR_LIBRARY_FILENAMES", &paths_str)
-							   }
 						   }
-					   }
-						add_to_xdg_data_env(xdg_data_dirs,
-							"__EGL_VENDOR_LIBRARY_DIRS", "glvnd/egl_vendor.d")
-					}
-					"vulkan" => {
-						let vk_dir = "vulkan/icd.d";
-						let vk_env = "VK_DRIVER_FILES";
-						if get_env_var("SHARUN_ALLOW_SYS_VKICD") == "1" {
-							env::remove_var("SHARUN_ALLOW_SYS_VKICD");
-							add_to_xdg_data_env(xdg_data_dirs, vk_env, vk_dir)
-						} else {
-							for xdg_data_dir in xdg_data_dirs.rsplit(":") {
-								let vk_icd_dir = Path::new(xdg_data_dir).join(vk_dir);
-								if vk_icd_dir.exists() {
-									if xdg_data_dir.starts_with(share_dir.to_str().unwrap_or_default()) {
-										add_to_env(vk_env, vk_icd_dir);
-									} else if let Ok(dir) = vk_icd_dir.read_dir() {
-										for entry in dir.flatten() {
-											let path = entry.path();
-											if is_file(&path) &&
-												entry.file_name().to_string_lossy().contains("nvidia") {
-												add_to_env(vk_env, path)
+							add_to_xdg_data_env(xdg_data_dirs,
+								"__EGL_VENDOR_LIBRARY_DIRS", "glvnd/egl_vendor.d")
+						}
+						"vulkan" => {
+							let vk_dir = "vulkan/icd.d";
+							let vk_env = "VK_DRIVER_FILES";
+							if get_env_var("SHARUN_ALLOW_SYS_VKICD") == "1" {
+								env::remove_var("SHARUN_ALLOW_SYS_VKICD");
+								add_to_xdg_data_env(xdg_data_dirs, vk_env, vk_dir)
+							} else {
+								for xdg_data_dir in xdg_data_dirs.rsplit(":") {
+									let vk_icd_dir = Path::new(xdg_data_dir).join(vk_dir);
+									if vk_icd_dir.exists() {
+										if xdg_data_dir.starts_with(graphics_share_str.as_str()) {
+											add_to_env(vk_env, vk_icd_dir);
+										} else if let Ok(dir) = vk_icd_dir.read_dir() {
+											for entry in dir.flatten() {
+												let path = entry.path();
+												if is_file(&path) &&
+													entry.file_name().to_string_lossy().contains("nvidia") {
+													add_to_env(vk_env, path)
+												}
 											}
 										}
 									}
 								}
 							}
 						}
-					}
-					"alsa" => {
-						let alsa_conf = entry_path.join("alsa.conf");
-						if !Path::new("/usr/share/alsa/alsa.conf").exists() && alsa_conf.exists() {
-							env::set_var("ALSA_CONFIG_PATH", alsa_conf)
-						}
-					}
-					"drirc.d" => {
-						let sys_drirc_dir = Path::new("/usr/share/drirc.d");
-						if !sys_drirc_dir.exists() {
-							env::set_var("DRIRC_CONFIGDIR", entry_path)
-						}
-					}
-					"X11" => {
-						let xkb = &entry_path.join("xkb");
-						if !Path::new("/usr/share/X11/xkb").exists() && xkb.exists() {
-							env::set_var("XKB_CONFIG_ROOT", xkb);
-							env::set_var("QT_XKB_CONFIG_ROOT", xkb)
-						}
-						let xlocale = &entry_path.join("locale");
-						if !Path::new("/usr/share/X11/locale").exists() && xlocale.exists() {
-							env::set_var("XLOCALEDIR", xlocale)
-						}
-					}
-					"libdrm" => {
-						add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", entry_path);
-						add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", "/usr/share/libdrm");
-						add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", "/usr/local/share/libdrm")
-					}
-					"libthai" => {
-						if entry_path.join("thbrk.tri").exists() {
-							env::set_var("LIBTHAI_DICTDIR", entry_path)
-						}
-					}
-					"glib-2.0" => {
-						add_to_xdg_data_env(xdg_data_dirs,
-							"GSETTINGS_SCHEMA_DIR", "glib-2.0/schemas")
-					}
-					"terminfo" => {
-						env::set_var("TERMINFO", entry_path)
-					}
-					"locale" => {
-						env::set_var("TEXTDOMAINDIR", entry_path)
-					}
-					"file" => {
-						let magic_file = &entry_path.join("misc/magic.mgc");
-						if magic_file.exists() {
-							env::set_var("MAGIC", magic_file)
-						}
-					}
-					"ghostscript" => {
-						let mut gs_base: Option<PathBuf> = None;
-						if let Ok(gs_dir) = entry_path.read_dir() {
-							for gs_entry in gs_dir.flatten() {
-								let gs_init = gs_entry.path().join("Resource").join("Init");
-								if gs_init.is_dir() {
-									gs_base = Some(gs_entry.path().join("Resource"));
-									break
-								}
+						"drirc.d" => {
+							let sys_drirc_dir = Path::new("/usr/share/drirc.d");
+							if !sys_drirc_dir.exists() {
+								env::set_var("DRIRC_CONFIGDIR", entry_path)
 							}
 						}
-						if gs_base.is_none() {
-							let gs_unversioned = entry_path.join("Resource").join("Init");
-							if gs_unversioned.is_dir() {
-								gs_base = Some(entry_path.join("Resource"))
-							}
+						"libdrm" => {
+							add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", entry_path);
+							add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", "/usr/share/libdrm");
+							add_to_env("AMDGPU_ASIC_ID_TABLE_PATHS", "/usr/local/share/libdrm")
 						}
-						if let Some(base) = gs_base {
-							env::set_var("GS_LIB", format!("{}:{}",
-								base.join("Init").to_string_lossy(),
-								base.to_string_lossy()))
-						}
+						_ => {}
 					}
-					mlt if mlt.starts_with("mlt-") => {
-						let profiles = entry_path.join("profiles");
-						let presets = entry_path.join("presets");
-						if profiles.exists() {
-							env::set_var("MLT_PROFILES_PATH", profiles)
-						}
-						if presets.exists() {
-							env::set_var("MLT_PRESETS_PATH", presets)
-						}
-					}
-					_ => {}
 				}
 			}
 		}
