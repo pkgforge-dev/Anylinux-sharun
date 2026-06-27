@@ -68,6 +68,16 @@ fn set_lib_env(
 		}
 	}
 
+	if let Ok(dir) = Path::new(bin_dir).read_dir() {
+		for entry in dir.flatten() {
+			if entry.file_name().to_string_lossy().starts_with("WebKit") &&
+				is_exe(&entry.path()) {
+				env::set_var("WEBKIT_EXEC_PATH", bin_dir);
+				break
+			}
+		}
+	}
+
 	let lib_path_file = &format!("{library_path}/lib.path");
 	if !Path::new(lib_path_file).exists() && is_writable(library_path) {
 		gen_library_path(library_path, lib_path_file)
@@ -139,6 +149,21 @@ fn set_lib_env(
 			if dir.starts_with("pipewire-") {
 				env::set_var("PIPEWIRE_MODULE_DIR", dir_path)
 			}
+			if dir.starts_with("webkit") {
+				for entry in WalkDir::new(dir_path).into_iter().flatten() {
+					let path = entry.path();
+					if is_file(path) {
+						let name = entry.file_name().to_string_lossy();
+						if name.starts_with("libwebkit") &&
+							name.ends_with("gtkinjectedbundle.so") {
+							if let Some(parent) = path.parent() {
+								env::set_var("WEBKIT_INJECTED_BUNDLE_PATH", parent);
+							}
+							break
+						}
+					}
+				}
+			}
 			if dir.starts_with("gtk-") {
 				add_to_env("GTK_PATH", dir_path);
 				env::set_var("GTK_EXE_PREFIX", sharun_dir);
@@ -182,6 +207,42 @@ fn set_lib_env(
 			}
 			if dir.starts_with("gegl-") {
 				env::set_var("GEGL_PATH", dir_path)
+			}
+			if dir.starts_with("ImageMagick-") {
+				env::set_var("MAGICK_HOME", sharun_dir);
+				let mut coders: Option<PathBuf> = None;
+				let mut filters: Option<PathBuf> = None;
+				for entry in WalkDir::new(dir_path)
+					.max_depth(2)
+					.into_iter()
+					.flatten()
+				{
+					let path = entry.path();
+					if path.is_dir() {
+						let name = entry.file_name().to_string_lossy();
+						if name == "coders" {
+							coders = Some(path.to_path_buf())
+						} else if name == "filters" {
+							filters = Some(path.to_path_buf())
+						}
+					}
+				}
+				if let Some(c) = coders {
+					env::set_var("MAGICK_CODER_MODULE_PATH", c)
+				}
+				if let Some(f) = filters {
+					env::set_var("MAGICK_CODER_FILTER_PATH", f)
+				}
+				let etc_dir = format!("{sharun_dir}/etc");
+				if let Ok(entries) = Path::new(&etc_dir).read_dir() {
+					for entry in entries.flatten() {
+						if entry.file_name().to_string_lossy().starts_with("ImageMagick-") &&
+							entry.path().is_dir() {
+							env::set_var("MAGICK_CONFIGURE_PATH", entry.path());
+							break
+						}
+					}
+				}
 			}
 			if dir == "libdecor" {
 				let plugins = &format!("{dir_path}/plugins-1");
@@ -331,6 +392,12 @@ fn set_share_env(sharun_dir: &str, mesa_share: Option<&str>) {
 								env::set_var("GS_LIB", format!("{}:{}",
 									base.join("Init").to_string_lossy(),
 									base.to_string_lossy()))
+							}
+						}
+						"pipewire" => {
+							if !Path::new("/usr/share/pipewire").exists() &&
+								env::var_os("PIPEWIRE_CONFIG_DIR").is_none() {
+									env::set_var("PIPEWIRE_CONFIG_DIR", entry_path)
 							}
 						}
 						mlt if mlt.starts_with("mlt-") => {
