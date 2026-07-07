@@ -217,6 +217,8 @@ fn main() {
 		exit(1)
 	});
 
+	let is_static_bin = is_static_elf(&elf_bytes).unwrap_or(false);
+
 	let mut library_path = if is_elf32_bin {
 		lib32
 	} else {
@@ -235,10 +237,14 @@ fn main() {
 	}
 	env::remove_var("SHARUN_ALLOW_QT_PLUGIN_PATH");
 
-	let interpreter = get_interpreter(&library_path).unwrap_or_else(|_|{
-		eprintln!("Interpreter not found!");
-		exit(1)
-	});
+	let interpreter = if is_static_bin {
+		PathBuf::new()
+	} else {
+		get_interpreter(&library_path).unwrap_or_else(|_|{
+			eprintln!("Interpreter not found!");
+			exit(1)
+		})
+	};
 
 	let working_dir = &get_env_var("SHARUN_WORKING_DIR");
 	if !working_dir.is_empty() {
@@ -356,7 +362,7 @@ fn main() {
 	let is_bun_elf = is_elf_section(&elf_bytes, ".bun").unwrap_or(false);
 
 	let mut interpreter_args: Vec<CString> = Vec::new();
-	if !is_pyinstaller_elf || is_pyinstaller_dir || is_elf32_bin {
+	if !is_static_bin && (!is_pyinstaller_elf || is_pyinstaller_dir || is_elf32_bin) {
 		interpreter_args.append(&mut vec![
 			CString::from_str(&interpreter.to_string_lossy()).unwrap_or_default(),
 			CString::new("--library-path").unwrap_or_default(),
@@ -384,7 +390,12 @@ fn main() {
 		}
 	}
 
-	if is_pyinstaller_elf || is_bun_elf || is_elf32_bin {
+	if is_static_bin {
+		drop(elf_bytes);
+		let err = Command::new(&bin).args(exec_args).exec();
+		eprint!("Failed to exec: {bin}: {err}");
+		exit(1)
+	} else if is_pyinstaller_elf || is_bun_elf || is_elf32_bin {
 		let err = if is_pyinstaller_dir || (!is_pyinstaller_elf && !is_bun_elf && is_elf32_bin) {
 			drop(elf_bytes);
 			let interpreter_args: Vec<String> = interpreter_args.iter()

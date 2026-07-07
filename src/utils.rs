@@ -251,6 +251,14 @@ pub fn is_elf_section(elf_bytes: &[u8], section_name: &str) -> Result<bool> {
 	Ok(false)
 }
 
+pub fn is_static_elf(elf_bytes: &[u8]) -> Result<bool> {
+	if let Ok(elf) = Elf::parse(elf_bytes) {
+		return Ok(!elf.program_headers.iter()
+			.any(|ph| ph.p_type == goblin::elf::program_header::PT_INTERP))
+	}
+	Ok(false)
+}
+
 pub fn get_env_var<K: AsRef<OsStr>>(key: K) -> String {
 	env::var(key).unwrap_or_default()
 }
