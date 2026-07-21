@@ -298,6 +298,10 @@ fn main() {
 		env::remove_var("SHARUN_EXTRA_LIBRARY_PATH");
 	}
 
+	if Path::new("/etc/libnvidiacurrent").is_dir() {
+		library_path += ":/etc/libnvidiacurrent";
+	}
+
 	library_path += ":/usr/lib:/lib";
 	if is_elf32_bin {
 		library_path += ":/usr/lib32:/lib32";
