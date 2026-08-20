@@ -361,12 +361,10 @@ fn main() {
 		}
 	}
 
-	let is_pyinstaller_elf = is_elf_section(&elf_bytes, "pydata").unwrap_or(false);
-	let is_pyinstaller_dir = Path::new(&shared_bin).join("_internal").exists();
-	let is_bun_elf = is_elf_section(&elf_bytes, ".bun").unwrap_or(false);
+	let is_patched_bin = is_patched_elf(&bin, &elf_bytes);
 
 	let mut interpreter_args: Vec<CString> = Vec::new();
-	if !is_static_bin && (!is_pyinstaller_elf || is_pyinstaller_dir || is_elf32_bin) {
+	if !is_static_bin && !is_patched_bin {
 		interpreter_args.append(&mut vec![
 			CString::from_str(&interpreter.to_string_lossy()).unwrap_or_default(),
 			CString::new("--library-path").unwrap_or_default(),
@@ -374,7 +372,7 @@ fn main() {
 			CString::new("--argv0").unwrap_or_default()
 		]);
 
-		if is_pyinstaller_elf || is_elf32_bin {
+		if is_elf32_bin {
 			interpreter_args.push(CString::new(&*bin).unwrap_or_default())
 		} else {
 			interpreter_args.push(CString::new(arg0_path.to_str().unwrap_or_default()).unwrap_or_default())
@@ -399,19 +397,12 @@ fn main() {
 		let err = Command::new(&bin).args(exec_args).exec();
 		eprint!("Failed to exec: {bin}: {err}");
 		exit(1)
-	} else if is_pyinstaller_elf || is_bun_elf || is_elf32_bin {
-		let err = if is_pyinstaller_dir || (!is_pyinstaller_elf && !is_bun_elf && is_elf32_bin) {
-			drop(elf_bytes);
-			let interpreter_args: Vec<String> = interpreter_args.iter()
-				.map(|s| s.clone().into_string().unwrap_or_default()).skip(1).collect();
-			Command::new(interpreter)
-				.args(interpreter_args)
-				.exec()
-		} else {
+	} else if is_patched_bin || is_elf32_bin {
+		let err = if is_patched_bin {
 			drop(elf_bytes);
 			let temp_ld = "/tmp/.ld-sharun.so.67";
 			std::fs::copy(&interpreter, &temp_ld).unwrap_or_else(|err|{
-				eprintln!("pyinstaller/bun: Failed to copy interpreter to {temp_ld}: {err}");
+				eprintln!("Failed to copy interpreter to {temp_ld}: {err}");
 				exit(1)
 			});
 			let _ = std::fs::set_permissions(&temp_ld, std::fs::Permissions::from_mode(0o777));
@@ -422,6 +413,13 @@ fn main() {
 			}
 			Command::new(&bin)
 				.args(exec_args)
+				.exec()
+		} else {
+			drop(elf_bytes);
+			let interpreter_args: Vec<String> = interpreter_args.iter()
+				.map(|s| s.clone().into_string().unwrap_or_default()).skip(1).collect();
+			Command::new(interpreter)
+				.args(interpreter_args)
 				.exec()
 		};
 		eprint!("Failed to exec: {bin}: {err}");

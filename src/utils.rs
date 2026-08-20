@@ -236,19 +236,19 @@ pub fn get_elf(path: &String, is_elf32: bool) -> Result<Vec<u8>> {
 	}
 }
 
-pub fn is_elf_section(elf_bytes: &[u8], section_name: &str) -> Result<bool> {
-	if let Ok(elf) = Elf::parse(elf_bytes) {
-		if let Some(section_headers) = elf.section_headers.as_slice().get(..) {
-			for section_header in section_headers {
-				if let Some(name) = elf.shdr_strtab.get_at(section_header.sh_name) {
-					if name == section_name {
-						return Ok(true)
-					}
-				}
-			}
-		}
-	}
-	Ok(false)
+pub fn is_patched_elf(path: &str, elf_bytes: &[u8]) -> bool {
+	use goblin::{elf::{Elf, program_header::{ProgramHeader, PT_INTERP}}, container::Ctx};
+	use std::os::unix::fs::FileExt;
+	let Some(header) = Elf::parse_header(elf_bytes).ok() else { return false };
+	let ctx = Ctx::new(header.container().unwrap_or_default(), header.endianness().unwrap_or_default());
+	let Some(phdr) = ProgramHeader::parse(elf_bytes, header.e_phoff as usize, header.e_phnum as usize, ctx)
+		.ok().and_then(|phdrs| phdrs.into_iter().find(|ph| ph.p_type == PT_INTERP))
+	else { return false };
+	// patchelf may append the interpreter string at EOF, so read it from the file
+	let mut interp = vec![0; phdr.p_filesz.min(4096) as usize];
+	std::fs::File::open(path).ok()
+		.and_then(|f| f.read_exact_at(&mut interp, phdr.p_offset).ok())
+		.is_some_and(|_| interp.starts_with(b"/tmp/.ld-sharun.so"))
 }
 
 pub fn is_static_elf(elf_bytes: &[u8]) -> Result<bool> {
