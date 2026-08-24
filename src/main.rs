@@ -401,11 +401,16 @@ fn main() {
 		let err = if is_patched_bin {
 			drop(elf_bytes);
 			let temp_ld = "/tmp/.ld-sharun.so.67";
-			std::fs::copy(&interpreter, &temp_ld).unwrap_or_else(|err|{
-				eprintln!("Failed to copy interpreter to {temp_ld}: {err}");
+			let tmp_ld = format!("{temp_ld}.{}", std::process::id());
+			std::fs::copy(&interpreter, &tmp_ld).unwrap_or_else(|err|{
+				eprintln!("Failed to copy interpreter to {tmp_ld}: {err}");
 				exit(1)
 			});
-			let _ = std::fs::set_permissions(&temp_ld, std::fs::Permissions::from_mode(0o777));
+			let _ = std::fs::set_permissions(&tmp_ld, std::fs::Permissions::from_mode(0o777));
+			std::fs::rename(&tmp_ld, &temp_ld).unwrap_or_else(|err|{
+				eprintln!("Failed to install interpreter to {temp_ld}: {err}");
+				exit(1)
+			});
 			env::set_var("LD_LIBRARY_PATH", &library_path);
 			let preload = read_preload(&sharun_dir);
 			if !preload.is_empty() {
