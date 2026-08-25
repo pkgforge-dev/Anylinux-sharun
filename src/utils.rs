@@ -1,9 +1,10 @@
 use std::{
+	collections::HashSet,
 	env,
 	path::{Path, PathBuf},
 	ffi::OsStr,
 	process::{Command, exit},
-	fs::{File, write, read_to_string},
+	fs::{File, write, read_to_string, read},
 	os::unix::{fs::{MetadataExt, PermissionsExt}, process::CommandExt},
 	io::{Read, Result, Error, BufRead, BufReader, ErrorKind::{InvalidData, NotFound}}
 };
@@ -409,4 +410,34 @@ pub fn collect_json_files(dir: &Path) -> Vec<PathBuf> {
 		}
 	}
 	json_paths
+}
+
+pub fn get_ld_cache_dirs(cache_file: &str) -> String {
+	let Ok(data) = read(cache_file) else { return String::new() };
+	let mut seen: HashSet<&[u8]> = HashSet::new();
+	let mut dirs: Vec<&[u8]> = Vec::new();
+	let len = data.len();
+	let mut i = 0;
+	while i < len {
+		while i < len && (data[i] < 0x20 || data[i] > 0x7e) { i += 1 }
+		let start = i;
+		while i < len && !(data[i] < 0x20 || data[i] > 0x7e) { i += 1 }
+		if start < len && data[start] == b'/' {
+			let chunk = &data[start..i];
+			if let Some(pos) = chunk.iter().rposition(|&c| c == b'/') {
+				if pos > 0 && seen.insert(&chunk[..pos]) {
+					dirs.push(&chunk[..pos]);
+				}
+			}
+		}
+	}
+	dirs.sort_unstable();
+	let mut out = String::new();
+	for dir in dirs {
+		let Ok(dir) = core::str::from_utf8(dir) else { continue };
+		if !Path::new(dir).is_dir() { continue }
+		if !out.is_empty() { out.push(':') }
+		out.push_str(dir);
+	}
+	out
 }
