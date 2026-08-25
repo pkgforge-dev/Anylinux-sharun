@@ -8,6 +8,7 @@ use std::{
 };
 
 mod utils;
+mod abi_note;
 mod apprun;
 mod gio_launch_desktop;
 mod bwrap_wrapper;
