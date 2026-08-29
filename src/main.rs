@@ -318,8 +318,10 @@ fn main() {
 		{ library_path += ":/usr/lib/riscv64-linux-gnu" }
 		#[cfg(target_arch = "loongarch64")]
 		{ library_path += ":/usr/lib/loongarch64-linux-gnu" }
-		#[cfg(target_arch = "powerpc64")]
+		#[cfg(all(target_arch = "powerpc64", target_endian = "big"))]
 		{ library_path += ":/usr/lib/powerpc64-linux-gnu" }
+		#[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
+		{ library_path += ":/usr/lib/powerpc64le-linux-gnu" }
 	}
 
 	let cache_library_path = get_ld_cache_dirs("/etc/ld.so.cache");

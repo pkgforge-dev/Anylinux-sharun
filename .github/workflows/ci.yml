@@ -31,6 +31,10 @@ jobs:
             env: POWERPC64_UNKNOWN_LINUX_MUSL
             triple: powerpc64-unknown-linux-musl
             zigtarget: powerpc64-linux-musl
+          - arch: ppc64le
+            env: POWERPC64LE_UNKNOWN_LINUX_MUSL
+            triple: powerpc64le-unknown-linux-musl
+            zigtarget: powerpc64le-linux-musl
           - arch: loongarch64
             env: LOONGARCH64_UNKNOWN_LINUX_MUSL
             triple: loongarch64-unknown-linux-musl

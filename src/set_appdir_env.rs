@@ -123,8 +123,10 @@ fn set_lib_env(
 						add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib/riscv64-linux-gnu/dri");
 						#[cfg(target_arch = "loongarch64")]
 						add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib/loongarch64-linux-gnu/dri");
-						#[cfg(target_arch = "powerpc64")]
+						#[cfg(all(target_arch = "powerpc64", target_endian = "big"))]
 						add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib/powerpc64-linux-gnu/dri");
+						#[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
+						add_to_env("LIBVA_DRIVERS_PATH", "/usr/lib/powerpc64le-linux-gnu/dri");
 				}
 				add_to_env("LIBVA_DRIVERS_PATH", dir_path)
 			}
@@ -140,8 +142,10 @@ fn set_lib_env(
 				add_to_env("GBM_BACKENDS_PATH", "/usr/lib/riscv64-linux-gnu/gbm");
 				#[cfg(target_arch = "loongarch64")]
 				add_to_env("GBM_BACKENDS_PATH", "/usr/lib/loongarch64-linux-gnu/gbm");
-				#[cfg(target_arch = "powerpc64")]
+				#[cfg(all(target_arch = "powerpc64", target_endian = "big"))]
 				add_to_env("GBM_BACKENDS_PATH", "/usr/lib/powerpc64-linux-gnu/gbm");
+				#[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
+				add_to_env("GBM_BACKENDS_PATH", "/usr/lib/powerpc64le-linux-gnu/gbm");
 				add_to_env("GBM_BACKENDS_PATH", dir_path)
 			}
 			if dir == "libheif" {
