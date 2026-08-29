@@ -314,6 +314,12 @@ fn main() {
 		{ library_path += ":/usr/lib/x86_64-linux-gnu" }
 		#[cfg(target_arch = "aarch64")]
 		{ library_path += ":/usr/lib/aarch64-linux-gnu" }
+		#[cfg(target_arch = "riscv64")]
+		{ library_path += ":/usr/lib/riscv64-linux-gnu" }
+		#[cfg(target_arch = "loongarch64")]
+		{ library_path += ":/usr/lib/loongarch64-linux-gnu" }
+		#[cfg(target_arch = "powerpc64")]
+		{ library_path += ":/usr/lib/powerpc64-linux-gnu" }
 	}
 
 	let cache_library_path = get_ld_cache_dirs("/etc/ld.so.cache");

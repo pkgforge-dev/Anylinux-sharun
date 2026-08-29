@@ -4,11 +4,48 @@ on:
   workflow_dispatch:
 
 jobs:
-  build_and_release:
-    name: sharun
+  build:
+    name: sharun-${{ matrix.arch }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl.cc blocks/stalls GitHub runner IPs, so those downloads go
+          # through our proxy (api.rv.pkgforge.dev)
+          - arch: x86_64
+            triple: x86_64-unknown-linux-musl
+          - arch: aarch64
+            triple: aarch64-unknown-linux-musl
+            env: AARCH64_UNKNOWN_LINUX_MUSL
+            toolchain: https://api.rv.pkgforge.dev/https://musl.cc/aarch64-linux-musl-cross.tgz
+            base: aarch64-linux-musl-cross
+            linker: aarch64-linux-musl-gcc
+          - arch: riscv64
+            triple: riscv64gc-unknown-linux-musl
+            env: RISCV64GC_UNKNOWN_LINUX_MUSL
+            toolchain: https://api.rv.pkgforge.dev/https://musl.cc/riscv64-linux-musl-cross.tgz
+            base: riscv64-linux-musl-cross
+            linker: riscv64-linux-musl-gcc
+            musl_lib: riscv64-linux-musl-cross/riscv64-linux-musl/lib
+            gcc_lib: riscv64-linux-musl-cross/lib/gcc/riscv64-linux-musl
+          - arch: powerpc64
+            triple: powerpc64-unknown-linux-musl
+            env: POWERPC64_UNKNOWN_LINUX_MUSL
+            toolchain: https://api.rv.pkgforge.dev/https://musl.cc/powerpc64-linux-musl-cross.tgz
+            base: powerpc64-linux-musl-cross
+            linker: powerpc64-linux-musl-gcc
+            musl_lib: powerpc64-linux-musl-cross/powerpc64-linux-musl/lib
+            gcc_lib: powerpc64-linux-musl-cross/lib/gcc/powerpc64-linux-musl
+          - arch: loongarch64
+            triple: loongarch64-unknown-linux-musl
+            env: LOONGARCH64_UNKNOWN_LINUX_MUSL
+            toolchain: https://downloads.openwrt.org/releases/24.10.2/targets/loongarch64/generic/openwrt-toolchain-24.10.2-loongarch64-generic_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            zstd: true
+            base: openwrt-toolchain-24.10.2-loongarch64-generic_gcc-13.3.0_musl.Linux-x86_64/toolchain-loongarch64_generic_gcc-13.3.0_musl
+            linker: loongarch64-openwrt-linux-musl-gcc
+            musl_lib: openwrt-toolchain-24.10.2-loongarch64-generic_gcc-13.3.0_musl.Linux-x86_64/toolchain-loongarch64_generic_gcc-13.3.0_musl/lib
+            gcc_lib: openwrt-toolchain-24.10.2-loongarch64-generic_gcc-13.3.0_musl.Linux-x86_64/toolchain-loongarch64_generic_gcc-13.3.0_musl/lib/gcc/loongarch64-openwrt-linux-musl
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,33 +59,85 @@ jobs:
 
       - name: Install deps
         run: |
-          sudo apt update && sudo apt install binutils qemu-user-static -y
+          sudo apt update && sudo apt install musl-tools zstd -y
           rustup component add rust-src --toolchain nightly
-          cargo install cross
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            rustup target add aarch64-unknown-linux-musl
+          fi
 
-      - name: Build x86_64
+      - name: Setup cross toolchain
+        if: matrix.toolchain
         run: |
-          cargo clean
-          cargo build --release
-          mv target/x86_64-unknown-linux-musl/release/sharun sharun-x86_64
+          mkdir -p "$RUNNER_TEMP/tc" && cd "$RUNNER_TEMP/tc"
+          URL="${{ matrix.toolchain }}"
+          ARCHIVE=$(basename "$URL")
+          OK=0
+          for i in 1 2 3; do
+            curl -fL --connect-timeout 30 -C - -o "$ARCHIVE" "$URL" && OK=1 && break
+            echo "download attempt $i failed, retrying in 20s"
+            sleep 20
+          done
+          [ "$OK" = 1 ] || { echo "download failed after 3 attempts"; exit 1; }
+          if [ "${{ matrix.zstd }}" = "true" ]; then
+            tar --zstd -xf "$ARCHIVE"
+          else
+            tar xzf "$ARCHIVE"
+          fi
 
-      - name: Build aarch64
+      # Tier-3 musl targets ship no self-contained crt objects, so add the
+      # toolchain's crt + libgcc (as libunwind) to the rust sysroot.
+      - name: Add crt objects to rust sysroot
+        if: matrix.musl_lib
         run: |
-          cargo clean
-          cross build --release --target aarch64-unknown-linux-musl
-          mv target/aarch64-unknown-linux-musl/release/sharun sharun-aarch64
+          SYSROOT=$(rustc +nightly --print sysroot)
+          SC="${SYSROOT}/lib/rustlib/${{ matrix.triple }}/lib/self-contained"
+          mkdir -p "$SC"
+          TC="$RUNNER_TEMP/tc"
+          cp "${TC}/${{ matrix.musl_lib }}"/{crt1.o,Scrt1.o,rcrt1.o,crti.o,crtn.o} "$SC/"
+          cp "${TC}/${{ matrix.gcc_lib }}"/*/crtbegin.o "${TC}/${{ matrix.gcc_lib }}"/*/crtend.o "$SC/"
+          cp "${TC}/${{ matrix.gcc_lib }}"/*/libgcc_eh.a "$SC/libunwind.a"
+
+      - name: Build
+        run: |
+          if [ -n "${{ matrix.env }}" ]; then
+            export CARGO_TARGET_${{ matrix.env }}_LINKER="$RUNNER_TEMP/tc/${{ matrix.base }}/bin/${{ matrix.linker }}"
+          fi
+          export RUSTFLAGS="-C target-feature=+crt-static"
+          cargo build --release --target ${{ matrix.triple }}
+          mv "target/${{ matrix.triple }}/release/sharun" "sharun-${{ matrix.arch }}"
 
       - name: Strip
         run: |
-          (git clone https://github.com/aunali1/super-strip.git && cd super-strip
-          make
-          sudo mv -fv sstrip /usr/bin/)
-          sstrip sharun-*
+          git clone -q https://github.com/aunali1/super-strip.git
+          make -C super-strip
+          ./super-strip/sstrip "sharun-${{ matrix.arch }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sharun-${{ matrix.arch }}
+          path: sharun-${{ matrix.arch }}
+
+  release:
+    name: Draft release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sharun-*
+          merge-multiple: true
 
       - name: Get version
         run: |
+          chmod +x sharun-*
           cp sharun-x86_64 sharun
-          chmod +x ./sharun
           echo "VERSION=$(./sharun --version | awk '{print $NF}')" >> "${GITHUB_ENV}"
 
       - name: Check tag doesn't exist

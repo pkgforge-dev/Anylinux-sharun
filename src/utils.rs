@@ -32,6 +32,22 @@ pub fn get_interpreter(library_path: &str) -> Result<PathBuf> {
 			"ld-linux-aarch64.so.1".into(),
 			"ld-musl-aarch64.so.1".into()
 		]);
+		#[cfg(target_arch = "riscv64")]         // target riscv64gc-unknown-linux-musl
+		interpreters.append(&mut vec![
+			"ld-linux-riscv64-lp64d.so.1".into(),
+			"ld-musl-riscv64.so.1".into()
+		]);
+		#[cfg(target_arch = "loongarch64")]     // target loongarch64-unknown-linux-musl
+		interpreters.append(&mut vec![
+			"ld-linux-loongarch-lp64d.so.1".into(),
+			"ld-musl-loongarch64.so.1".into()
+		]);
+		#[cfg(target_arch = "powerpc64")]       // target powerpc64-unknown-linux-musl
+		interpreters.append(&mut vec![
+			"ld64.so.1".into(),                 // glibc (Debian, Fedora, ...)
+			"ld64.so.2".into(),                 // glibc (Arch Linux PPC)
+			"ld-musl-powerpc64.so.1".into()
+		]);
 	}
 	for interpreter in interpreters {
 		let interpreter_path = Path::new(library_path).join(interpreter);
