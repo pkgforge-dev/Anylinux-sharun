@@ -27,7 +27,7 @@ jobs:
             env: RISCV64GC_UNKNOWN_LINUX_MUSL
             triple: riscv64gc-unknown-linux-musl
             zigtarget: riscv64-linux-musl
-          - arch: powerpc64
+          - arch: ppc64
             env: POWERPC64_UNKNOWN_LINUX_MUSL
             triple: powerpc64-unknown-linux-musl
             zigtarget: powerpc64-linux-musl
