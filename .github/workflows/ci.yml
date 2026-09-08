@@ -134,13 +134,14 @@ jobs:
           mkdir pkg
           cp "sharun-${{ matrix.arch }}" pkg/sharun
           cp lib/*.so pkg/
-          ( cd pkg && tar -cf "../sharun-${{ matrix.arch }}.tar" -- * )
+          tar_name="sharun+helper-libs-${{ matrix.arch }}.tar"
+          ( cd pkg && tar -cf "../$tar_name" -- * )
           rm -rf pkg
-          if tar -tf "sharun-${{ matrix.arch }}.tar" | grep -q '/'; then
+          if tar -tf "$tar_name" | grep -q '/'; then
             echo "ERROR: tar contains nested paths" >&2
             exit 1
           fi
-          tar -tvf "sharun-${{ matrix.arch }}.tar"
+          tar -tvf "$tar_name"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -148,7 +149,7 @@ jobs:
           name: sharun-${{ matrix.arch }}
           path: |
             sharun-${{ matrix.arch }}
-            sharun-${{ matrix.arch }}.tar
+            sharun+helper-libs-${{ matrix.arch }}.tar
 
   release:
     name: Draft release
@@ -188,4 +189,6 @@ jobs:
           draft: true
           generate_release_notes: true
           make_latest: true
-          files: sharun-*
+          files: |
+            sharun-*
+            sharun+helper-libs-*

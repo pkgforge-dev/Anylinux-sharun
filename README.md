@@ -31,7 +31,7 @@ This fork is used by the [Anylinux-AppImages](https://github.com/pkgforge-dev/An
   Each release contains, per architecture:
 
   - `sharun-$ARCH` - the sharun binary.
-  - `sharun-$ARCH.tar` - sharun plus the prebuilt libraries in a single flat tar (`sharun`, `anylinux.so`, `gtk-class-fix.so`, `fix-gnome-glycin.so`), so consumers get everything with one download and no C compiler is needed on the build host.
+  - `sharun+helper-libs-$ARCH.tar` - sharun plus the prebuilt libraries in a single flat tar (`sharun`, `anylinux.so`, `gtk-class-fix.so`, `fix-gnome-glycin.so`), so consumers get everything with one download and no C compiler is needed on the build host.
 
 ## What this fork removes
 
