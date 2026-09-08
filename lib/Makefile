@@ -9,12 +9,18 @@ SOFLAGS  = -shared -fPIC
 LDFLAGS ?=
 LDLIBS   = -ldl
 
-LIBS = anylinux.so gtk-class-fix.so fix-gnome-glycin.so
+LIBS = anylinux.so gtk-class-fix.so
 
 all: $(LIBS)
 
-%.so: %.c
+anylinux.so: anylinux.c
 	$(CC) $(SOFLAGS) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LDLIBS)
+
+# fix-gnome-glycin.c is linked into gtk-class-fix.so, it is NOT built as
+# its own library. Everything glycin related is reached via dlsym, the lib
+# must never hold link-time references to glycin (see Pinta-AppImage#17)
+gtk-class-fix.so: gtk-class-fix.c fix-gnome-glycin.c
+	$(CC) $(SOFLAGS) $(CFLAGS) $(LDFLAGS) $^ -o $@ $(LDLIBS)
 
 clean:
 	rm -f $(LIBS)
