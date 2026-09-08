@@ -123,6 +123,17 @@ jobs:
               echo "ERROR: $so requires $max, which is newer than the floor $floor" >&2
               exit 1
             fi
+            # No lib may hold link-time references to symbols of any bundled
+            # library, only libc and libdl imports are allowed. A stray one is
+            # fatal on apps that do not ship that library, this is what broke
+            # Pinta when the glycin fix was part of gtk-class-fix.so
+            # https://github.com/pkgforge-dev/Pinta-AppImage/issues/17
+            bad=$(objdump -T "$so" | awk '$3=="*UND*"{ if (NF==6 && $5!~/^\(GLIBC_/ && $6!~/^dl/) print $6; else if (NF==5 && $5!~/^dl/) print $5 }' | sort -u)
+            if [ -n "$bad" ]; then
+              echo "ERROR: $so has link-time references to non-libc symbols:" >&2
+              echo "$bad" | sed 's/^/  /' >&2
+              exit 1
+            fi
           done
 
       # Single tar with sharun + the libs so consumers (quick-sharun) can
