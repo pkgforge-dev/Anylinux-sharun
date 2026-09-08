@@ -128,13 +128,13 @@ jobs:
       # Single tar with sharun + the libs so consumers (quick-sharun) can
       # grab everything in one download without building on the host.
       # Flat layout on purpose, no nested directory and no leading ./
+      # Files inside carry no arch, the tar name already has it
       - name: Package
         run: |
           mkdir pkg
           cp "sharun-${{ matrix.arch }}" pkg/sharun
           cp lib/*.so pkg/
           ( cd pkg && tar -cf "../sharun-${{ matrix.arch }}.tar" -- * )
-          for so in pkg/*.so; do cp "$so" "${{ matrix.arch }}-${so##*/}"; done
           rm -rf pkg
           if tar -tf "sharun-${{ matrix.arch }}.tar" | grep -q '/'; then
             echo "ERROR: tar contains nested paths" >&2
@@ -149,7 +149,6 @@ jobs:
           path: |
             sharun-${{ matrix.arch }}
             sharun-${{ matrix.arch }}.tar
-            ${{ matrix.arch }}-*.so
 
   release:
     name: Draft release
@@ -189,6 +188,4 @@ jobs:
           draft: true
           generate_release_notes: true
           make_latest: true
-          files: |
-            sharun-*
-            *-*.so
+          files: sharun-*
