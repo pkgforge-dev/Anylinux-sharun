@@ -22,10 +22,16 @@ This fork is used by the [Anylinux-AppImages](https://github.com/pkgforge-dev/An
 
 - **Bun workaround**: Detects Bun binaries and uses alternative execution paths so they run correctly via temp dynamic linker in `/tmp`. (These break when executed with the dynamic linker directly).
 
-- **Prebuilt helper libraries**: The CI builds the preload libraries used by [quick-sharun](https://github.com/pkgforge-dev/Anylinux-AppImages/blob/main/useful-tools/quick-sharun.sh) (see `lib/`) with `zig cc` against a **glibc 2.31** floor (`2.36` for `loongarch64`, the first glibc version that supports that architecture). This guarantees they load inside any AppImage regardless of the glibc that was deployed, instead of depending on whatever glibc the CI host happened to have. Each release contains, per architecture:
+- **Prebuilt helper libraries**: The preload libraries used by [quick-sharun](https://github.com/pkgforge-dev/Anylinux-AppImages/blob/main/useful-tools/quick-sharun.sh) originally lived in the [Anylinux-AppImages](https://github.com/pkgforge-dev/Anylinux-AppImages) repo and were compiled on the host at deployment time. They are now kept here (see `lib/`) and built by the CI with `zig cc` against a **glibc 2.31** floor (`2.36` for `loongarch64`, the first glibc version that supports that architecture). This guarantees they load inside any AppImage regardless of the glibc that was deployed, instead of depending on whatever glibc the CI host happened to have. The libraries:
+
+  - `anylinux.so` - main preload library: unsets problematic environment variables for child/external processes, restores portable home/config/data/cache dirs, fixes broken host locales, redirects `bindtextdomain` to the bundled locales, forces NSS to only use bundled modules, can block libraries from being dlopened with `ANYLINUX_DO_NOT_LOAD_LIBS` and can change the running program name with `OVERRIDE_ARGV0`.
+  - `gtk-class-fix.so` - forces the GTK window class / application id to `GTK_WINDOW_CLASS`, fixing broken desktop integration in Wayland where GNOME uses a different window class than in X11.
+  - `fix-gnome-glycin.so` - forces GNOME's glycin image loader to disable its bwrap sandbox, which never works inside an AppImage (because glycin incorrectly binds AppImage paths to bwrap, resulting in crashes). We don't recommend you deploy your application with GNOME glycin, instead use [glycin-ng](https://github.com/QaidVoid/glycin-ng) which is a much smaller alternative that has working sandbox.
+
+  Each release contains, per architecture:
 
   - `sharun-$ARCH` - the sharun binary.
-  - `sharun-$ARCH.tar` - sharun plus the prebuilt libraries in a single flat tar, so consumers get everything with one download and no C compiler is needed on the build host. The files inside (`sharun`, `anylinux.so`, `gtk-class-fix.so`, `fix-gnome-glycin.so`) carry no arch in their names, the tar name already has it.
+  - `sharun-$ARCH.tar` - sharun plus the prebuilt libraries in a single flat tar (`sharun`, `anylinux.so`, `gtk-class-fix.so`, `fix-gnome-glycin.so`), so consumers get everything with one download and no C compiler is needed on the build host.
 
 ## What this fork removes
 
