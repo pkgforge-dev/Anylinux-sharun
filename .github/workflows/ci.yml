@@ -142,6 +142,9 @@ jobs:
             exit 1
           fi
           tar -tvf "$tar_name"
+          sha256sum "sharun-${{ matrix.arch }}" > "sharun-${{ matrix.arch }}.sha256"
+          sha256sum "$tar_name" > "$tar_name.sha256"
+          cat *.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -149,7 +152,9 @@ jobs:
           name: sharun-${{ matrix.arch }}
           path: |
             sharun-${{ matrix.arch }}
+            sharun-${{ matrix.arch }}.sha256
             sharun+helper-libs-${{ matrix.arch }}.tar
+            sharun+helper-libs-${{ matrix.arch }}.tar.sha256
 
   release:
     name: Draft release
