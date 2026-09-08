@@ -22,11 +22,17 @@ This fork is used by the [Anylinux-AppImages](https://github.com/pkgforge-dev/An
 
 - **Bun workaround**: Detects Bun binaries and uses alternative execution paths so they run correctly via temp dynamic linker in `/tmp`. (These break when executed with the dynamic linker directly).
 
+- **Prebuilt helper libraries**: The CI builds the preload libraries used by [quick-sharun](https://github.com/pkgforge-dev/Anylinux-AppImages/blob/main/useful-tools/quick-sharun.sh) (see `lib/`) with `zig cc` against a **glibc 2.31** floor (`2.36` for `loongarch64`, the first glibc version that supports that architecture). This guarantees they load inside any AppImage regardless of the glibc that was deployed, instead of depending on whatever glibc the CI host happened to have. Each release contains, per architecture:
+
+  - `sharun-$ARCH` - the sharun binary.
+  - `sharun-$ARCH.tar` - sharun plus the prebuilt libraries in a single flat tar (`sharun`, `anylinux.so`, `gtk-class-fix.so`, `fix-gnome-glycin.so`), so consumers get everything with one download and no C compiler is needed on the build host.
+  - `$ARCH-anylinux.so`, `$ARCH-gtk-class-fix.so` and `$ARCH-fix-gnome-glycin.so` - the loose libraries, for grabbing only what is needed.
+
 ## What this fork removes
 
 - **`lib4bin`**: Has been removed. Use [quick-sharun](https://github.com/pkgforge-dev/Anylinux-AppImages/blob/main/useful-tools/quick-sharun.sh) instead.
 
-- `xdg-open` wrapper: Has been removed. `quick-sharun` uses [anylinux.so](https://github.com/pkgforge-dev/Anylinux-AppImages/blob/main/useful-tools/lib/anylinux.c) which fixes the same issues that the wrapper did and better. (Works on all external binaires, not just `xdg-open`).
+- `xdg-open` wrapper: Has been removed. `quick-sharun` uses [anylinux.so](https://github.com/pkgforge-dev/Anylinux-sharun/blob/main/lib/anylinux.c) which fixes the same issues that the wrapper did and better. (Works on all external binaires, not just `xdg-open`).
 
 - **`sharun-aio`**: The all-in-one binary with bundled `lib4bin` dependencies is removed.
 
