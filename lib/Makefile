@@ -9,9 +9,12 @@ SOFLAGS  = -shared -fPIC
 LDFLAGS ?=
 LDLIBS   = -ldl
 
-LIBS = anylinux.so gtk-fix-nonsense.so glycin-fix.so
+LIBS = anylinux.so gtk-fix-nonsense.so glycin-fix.so path-mapping.so
 
 all: $(LIBS)
+
+# path-mapping.c includes its common header
+path-mapping.so: path-mapping.c pathmap_common.h
 
 %.so: %.c
 	$(CC) $(SOFLAGS) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LDLIBS)
