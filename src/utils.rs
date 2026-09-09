@@ -403,6 +403,12 @@ pub fn read_preload(sharun_dir: &str, is_lib32_bin: bool) -> Vec<String> {
 		preload.extend(libs);
 	}
 
+	// path-mapping.so is shipped together with the other helper libraries
+	// but is only useful when PATH_MAPPING is set, keep it out otherwise
+	if get_env_var("PATH_MAPPING").is_empty() {
+		preload.retain(|lib| basename(lib) != "path-mapping.so");
+	}
+
 	preload
 }
 
