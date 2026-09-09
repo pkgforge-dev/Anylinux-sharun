@@ -5,9 +5,6 @@
  * - Forces the window class / app id to $GTK_WINDOW_CLASS. GNOME uses
  *   a different class in wayland than in x11, breaking desktop
  *   integration of appimages.
- * - Switches gsettings to the keyfile backend when portable
- *   home/config mode is used, otherwise settings end up on the host
- *   dconf.
  *
  * USAGE:
  *   GTK_WINDOW_CLASS=fuck.gnome LD_PRELOAD=./gtk-fix-nonsense.so /path/to/app
@@ -15,10 +12,8 @@
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
 
 /* ------------------------------------------------------------------ */
 /*  Real symbol resolution                                            */
@@ -185,29 +180,6 @@ void gdk_window_set_app_id(void *window, const char *app_id) {
 		real_sym(&real_gdk_window_set_app_id, "gdk_window_set_app_id");
 	if (real)
 		real(window, effective_id(app_id));
-}
-
-/* ------------------------------------------------------------------ */
-/*  GSettings backend fix                                             */
-/* ------------------------------------------------------------------ */
-
-/* portable home/config mode, without keyfile settings end up on the host dconf */
-__attribute__((constructor))
-static void fix_gsettings_backend(void) {
-	const char *appimage = getenv("APPIMAGE");
-	if (!appimage || !*appimage)
-		return;
-
-	const char *portable_dirs[] = { ".config", ".home" };
-	for (size_t i = 0; i < sizeof portable_dirs / sizeof *portable_dirs; i++) {
-		char portable_dir[PATH_MAX];
-		snprintf(portable_dir, sizeof portable_dir, "%s%s", appimage, portable_dirs[i]);
-		struct stat st;
-		if (stat(portable_dir, &st) == 0 && S_ISDIR(st.st_mode)) {
-			setenv("GSETTINGS_BACKEND", "keyfile", 1);
-			return;
-		}
-	}
 }
 
 /* ------------------------------------------------------------------ */
