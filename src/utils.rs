@@ -379,13 +379,15 @@ pub fn read_preload(sharun_dir: &str, is_lib32_bin: bool) -> Vec<String> {
 		);
 	}
 
-	// every library found in $SHARUN_DIR/lib{,32}/preload is preloaded
-	// automatically, no need to keep a .preload file with the names
+	// every library found in $SHARUN_DIR/lib{,32}/sharun-preload is
+	// preloaded automatically, no need to keep a .preload file with the
+	// names. The name is sharun specific on purpose to prevent collisions
+	// with apps that have their own 'preload' dir with unrelated content
 	let lib_dir = if is_lib32_bin { "lib32" } else { "lib" };
-	let preload_dir = PathBuf::from(format!("{sharun_dir}/{lib_dir}/preload"));
+	let preload_dir = PathBuf::from(format!("{sharun_dir}/{lib_dir}/sharun-preload"));
 	if preload_dir.is_dir() {
 		let mut libs: Vec<String> = read_dir(&preload_dir).unwrap_or_else(|err| {
-			eprintln!("Failed to read '{lib_dir}/preload/' dir: {preload_dir:?}: {err}");
+			eprintln!("Failed to read '{lib_dir}/sharun-preload/' dir: {preload_dir:?}: {err}");
 			exit(1)
 		})
 		.filter_map(|entry| entry.ok())
