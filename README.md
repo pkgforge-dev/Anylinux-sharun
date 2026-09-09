@@ -6,11 +6,11 @@ This fork is used by the [Anylinux-AppImages](https://github.com/pkgforge-dev/An
 
 ## What this fork adds
 
-- **Extra architectures**: Builds for `riscv64`, `loongarch64` and `powerpc64` (big-endian) in addition to `x86_64` and `aarch64`. Uses a forked [userland-execve](https://github.com/pkgforge-dev/userland-execve-rust) with support for these architectures.
+- **Extra architectures**: Builds for `riscv64`, `loongarch64`, `powerpc64` (big-endian) and `ppc64le` in addition to `x86_64` and `aarch64`. Uses a forked [userland-execve](https://github.com/pkgforge-dev/userland-execve-rust) with support for these architectures.
 
 - **`SHARUN_MESA_PATH`**: Point to an external mesa installation (with `lib/` and `share/` subdirs). **Allows switching mesa versions at runtime.**
 
-- **bwrap-wrapper**: When `sharun` is invoked as `bwrap`, it intercepts `bwrap` arguments to preserve essential paths and env variables (`$APPDIR`, `/tmp`, `/proc`, `$APPDIR`, `$SHARUN_DIR`, `$PATH`). Rewrites hardcoded command paths to their AppDir equivalents. Falls back to system `bwrap` if real bwrap wasn't deployed. This lets applications that sandbox themselves with bwrap (example WebKitGTK) work correctly as AppImage.
+- **bwrap-wrapper**: When `sharun` is invoked as `bwrap`, it intercepts `bwrap` arguments to preserve essential paths and env variables (`$APPDIR`, `/tmp`, `/proc`, `$SHARUN_DIR`, `$PATH`). Rewrites hardcoded command paths to their AppDir equivalents. Falls back to system `bwrap` if real bwrap wasn't deployed. This lets applications that sandbox themselves with bwrap (example WebKitGTK) work correctly as AppImage.
 
 - **`gio-launch-desktop` handler**: When `sharun` is hardlinked as `gio-launch-desktop`, it sets `GIO_LAUNCHED_DESKTOP_FILE_PID` and launches the target. Required for AppImages that rely on GIO-based `.desktop` file launching.
 
@@ -28,8 +28,8 @@ This fork is used by the [Anylinux-AppImages](https://github.com/pkgforge-dev/An
 
   - `anylinux.so` - main preload library: unsets problematic environment variables for child/external processes, restores portable home/config/data/cache dirs, fixes broken host locales, redirects `bindtextdomain` to the bundled locales, forces NSS to only use bundled modules, can block libraries from being dlopened with `ANYLINUX_DO_NOT_LOAD_LIBS` and can change the running program name with `OVERRIDE_ARGV0`.
   - `gtk-fix-nonsense.so` - forces the GTK window class / application id to `GTK_WINDOW_CLASS`, fixing broken desktop integration in Wayland where GNOME uses a different window class than in X11. Safe to preload into applications with or without GTK, GLib or glycin.
-  - `glycin-fix.so` - disables the bwrap sandbox of GNOME's glycin image loader, which never works inside an AppImage because glycin incorrectly binds AppImage paths to bwrap, resulting in crashes. Only intended for applications that ship real glycin (`libglycin-*`), quick-sharun preloads it only for those, there is nothing to fix in [glycin-ng](https://github.com/QaidVoid/glycin-ng) based applications since it has a working sandbox. Glycin is only reached via `dlsym`/`dlopen(RTLD_NOLOAD)`, so the library is safe to preload into applications at build time that do not make use of glycin at all.
-  - `path-mapping.so` - vendored from [pathmap](https://github.com/VHSgunzo/pathmap), only the preload library, the standalone tracer binary is not built. Maps hardcoded paths at runtime with `PATH_MAPPING`/`PATHMAP_*` env variables, replaces hosting a git clone + C compiler to build it during deployment.
+  - `glycin-fix.so` - disables the bwrap sandbox of GNOME's glycin image loader, which never works inside an AppImage because glycin incorrectly binds AppImage paths to bwrap, resulting in crashes. Only intended for applications that ship real glycin (`libglycin-*`), quick-sharun preloads it only for those, there is nothing to fix in [glycin-ng](https://github.com/QaidVoid/glycin-ng) based applications since it has a working sandbox. Glycin is only reached via `dlsym`/`dlopen(RTLD_NOLOAD)`, so the library does not affect applications that do not make use of glycin at all.
+  - `path-mapping.so` - vendored from [pathmap](https://github.com/VHSgunzo/pathmap), only the preload library, the standalone tracer binary is not built. Maps hardcoded paths at runtime with `PATH_MAPPING`/`PATHMAP_*` env variables, sharun only preloads it when `PATH_MAPPING` is set and it replaces the git clone + C compiler build that deployments used to carry out.
 
   Each release contains, per architecture:
 
@@ -41,7 +41,7 @@ This fork is used by the [Anylinux-AppImages](https://github.com/pkgforge-dev/An
 
 - **`lib4bin`**: Has been removed. Use [quick-sharun](https://github.com/pkgforge-dev/Anylinux-AppImages/blob/main/useful-tools/quick-sharun.sh) instead.
 
-- `xdg-open` wrapper: Has been removed. `quick-sharun` uses [anylinux.so](https://github.com/pkgforge-dev/Anylinux-sharun/blob/main/lib/anylinux.c) which fixes the same issues that the wrapper did and better. (Works on all external binaires, not just `xdg-open`).
+- `xdg-open` wrapper: Has been removed. `quick-sharun` uses [anylinux.so](https://github.com/pkgforge-dev/Anylinux-sharun/blob/main/lib/anylinux.c) which fixes the same issues that the wrapper did and better. (Works on all external binaries, not just `xdg-open`).
 
 - **`sharun-aio`**: The all-in-one binary with bundled `lib4bin` dependencies is removed.
 
