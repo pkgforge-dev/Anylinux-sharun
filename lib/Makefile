@@ -9,7 +9,7 @@ SOFLAGS  = -shared -fPIC
 LDFLAGS ?=
 LDLIBS   = -ldl
 
-LIBS = anylinux.so gtk-fix-nonsense.so
+LIBS = anylinux.so gtk-fix-nonsense.so glycin-fix.so
 
 all: $(LIBS)
 
