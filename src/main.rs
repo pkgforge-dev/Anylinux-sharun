@@ -284,7 +284,8 @@ fn main() {
 
 	// the sharun-preload dir is part of the search path so the --preload
 	// flag and the .preload file can use bare names instead of full paths
-	let preload_dir = &format!("{sharun_dir}/{}", if is_elf32_bin { "lib32/sharun-preload" } else { "lib/sharun-preload" });
+	let lib_dir = if is_elf32_bin { "lib32" } else { "lib" };
+	let preload_dir = &format!("{sharun_dir}/{lib_dir}/sharun-preload");
 	if Path::new(preload_dir).is_dir() {
 		library_path += &format!(":{preload_dir}");
 	}
