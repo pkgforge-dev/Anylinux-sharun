@@ -266,6 +266,12 @@ fn set_lib_env(
 					env::set_var("LIBDECOR_PLUGIN_DIR", plugins)
 				}
 			}
+			if dir.starts_with("libpeas-") {
+				let loaders = &format!("{dir_path}/loaders");
+				if Path::new(loaders).exists() {
+					env::set_var("PEAS_PLUGIN_LOADERS_DIR", loaders)
+				}
+			}
 			if dir.starts_with("tcl") && Path::new(&format!("{dir_path}/msgs")).exists() {
 				add_to_env("TCL_LIBRARY", dir_path);
 				let tk = &format!("{library_path}/{}", dir.replace("tcl", "tk"));

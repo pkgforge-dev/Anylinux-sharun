@@ -18,7 +18,7 @@ This fork is used by the [Anylinux-AppImages](https://github.com/pkgforge-dev/An
 
 - **Directory structure**: Uses `lib`/`lib32` directly instead of `shared/lib`/`shared/lib32`. Fixes libraries that look for a relative `../share` directory and can't find it.
 
-- **Additional env vars**: Auto sets `LADSPA_PATH`, `FREI0R_PATH`, `MLT_REPOSITORY`, `MLT_PROFILES_PATH`, `MLT_PRESETS_PATH`, `GS_LIB`, `OPENSSL_CONF`, and `QT_XKB_CONFIG_ROOT` and likely more in the future.
+- **Additional env vars**: Auto sets `LADSPA_PATH`, `FREI0R_PATH`, `MLT_REPOSITORY`, `MLT_PROFILES_PATH`, `MLT_PRESETS_PATH`, `GS_LIB`, `OPENSSL_CONF`, `QT_XKB_CONFIG_ROOT`, `PEAS_PLUGIN_LOADERS_DIR` and likely more in the future.
 
 - **Bun workaround**: Detects Bun binaries and uses alternative execution paths so they run correctly via temp dynamic linker in `/tmp`. (These break when executed with the dynamic linker directly).
 
