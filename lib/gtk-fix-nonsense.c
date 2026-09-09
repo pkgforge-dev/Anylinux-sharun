@@ -10,6 +10,9 @@
  *  library is horribly written and does not resolve the full path of the
  *  binaries it passes to bwrap, it does not even check if bwrap is present!
  *
+ *  Portable home/config mode needs gsettings to use the keyfile backend
+ *  or the application settings end up on the host dconf instead.
+ *
  * USAGE:
  *   GTK_WINDOW_CLASS=fuck.gnome LD_PRELOAD=./gtk-fix-nonsense.so /path/to/app
  *
@@ -20,8 +23,10 @@
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 /* ------------------------------------------------------------------ */
 /*  GTK / GLib window-class overrides                                 */
@@ -197,6 +202,34 @@ static void force_not_sandboxed(void *loader) {
 GLY_LOADER_WRAPPER(loader_new)
 GLY_LOADER_WRAPPER(loader_new_for_stream)
 GLY_LOADER_WRAPPER(loader_new_for_bytes)
+
+/* ------------------------------------------------------------------ */
+/*  GSettings backend fix                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Portable home/config mode keeps the application settings next to the
+ * AppImage, gsettings needs to use the keyfile backend for that or
+ * settings end up on the host dconf instead
+ * (equivalent of quick-sharun's gsettings-backend.hook)
+ */
+__attribute__((constructor))
+static void fix_gsettings_backend(void) {
+	const char *appimage = getenv("APPIMAGE");
+	if (!appimage || !*appimage)
+		return;
+
+	const char *portable_dirs[] = { ".config", ".home" };
+	for (size_t i = 0; i < sizeof portable_dirs / sizeof *portable_dirs; i++) {
+		char portable_dir[PATH_MAX];
+		snprintf(portable_dir, sizeof portable_dir, "%s%s", appimage, portable_dirs[i]);
+		struct stat st;
+		if (stat(portable_dir, &st) == 0 && S_ISDIR(st.st_mode)) {
+			setenv("GSETTINGS_BACKEND", "keyfile", 1);
+			return;
+		}
+	}
+}
 
 /* ------------------------------------------------------------------ */
 /*  Constructor                                                       */
