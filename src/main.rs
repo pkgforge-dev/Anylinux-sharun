@@ -393,7 +393,7 @@ fn main() {
 			interpreter_args.push(CString::new(arg0_path.to_str().unwrap_or_default()).unwrap_or_default())
 		}
 
-		let preload = read_preload(&sharun_dir);
+		let preload = read_preload(&sharun_dir, is_elf32_bin);
 		if !preload.is_empty() {
 			interpreter_args.append(&mut vec![
 				CString::new("--preload").unwrap_or_default(),
@@ -427,7 +427,7 @@ fn main() {
 				exit(1)
 			});
 			env::set_var("LD_LIBRARY_PATH", &library_path);
-			let preload = read_preload(&sharun_dir);
+			let preload = read_preload(&sharun_dir, is_elf32_bin);
 			if !preload.is_empty() {
 				env::set_var("LD_PRELOAD", preload.join(" "));
 			}
