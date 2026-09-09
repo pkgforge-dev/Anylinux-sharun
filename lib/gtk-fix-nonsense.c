@@ -1,24 +1,22 @@
 /*
- * GTK Window Class Override + glycin sandbox disable
+ * GTK fixes
  * ===================================================
  *
- * PURPOSE:
- *  GNOME made the window class of applications different between x11 and
- *  wayland, breaking desktop integration of appimages as result.
- *
- *  Glycin forces sandboxing which fails 100% of the time here because the
- *  library is horribly written and does not resolve the full path of the
- *  binaries it passes to bwrap, it does not even check if bwrap is present!
- *
- *  Portable home/config mode needs gsettings to use the keyfile backend
- *  or the application settings end up on the host dconf instead.
+ * - Forces the window class / app id to $GTK_WINDOW_CLASS. GNOME uses
+ *   a different class in wayland than in x11, breaking desktop
+ *   integration of appimages.
+ * - Disables the glycin sandbox. glycin does not resolve the full path
+ *   of the binaries it passes to bwrap and never checks if bwrap even
+ *   exists, it never works inside an AppImage.
+ * - Switches gsettings to the keyfile backend when portable
+ *   home/config mode is used, otherwise settings end up on the host
+ *   dconf.
  *
  * USAGE:
  *   GTK_WINDOW_CLASS=fuck.gnome LD_PRELOAD=./gtk-fix-nonsense.so /path/to/app
  *
  * WARNING:
  *  This was 100% vibed with AI by someone that has no idea about C
- *  It works, but no idea if this can cause weird issues down the line
 */
 
 #define _GNU_SOURCE
@@ -141,15 +139,11 @@ void gdk_window_set_app_id(void *window, const char *app_id) {
 #endif
 
 /*
- * glycin is not always part of the global link map, for example dotnet
- * apps like Pinta load it and everything depending on it with dlopen,
- * so RTLD_NEXT and RTLD_DEFAULT from this preloaded library can never
- * see it. Reach the already loaded library via dlopen(RTLD_NOLOAD) on
- * its known sonames instead.
- *
- * Without this the RTLD_DEFAULT fallback used to find this very wrapper
- * and recurse into itself until the stack blew up, killing the whole
- * app (see Pinta-AppImage#17)
+ * glycin is not always in the global link map, dotnet apps like Pinta
+ * load it with dlopen so RTLD_NEXT/RTLD_DEFAULT cannot see it. Reach
+ * the already loaded library via dlopen(RTLD_NOLOAD) instead.
+ * Without this RTLD_DEFAULT would find this very wrapper and recurse
+ * until the stack blew up (Pinta-AppImage#17)
  */
 static void *gly_handle(void) {
 	static void *handle;
@@ -190,7 +184,7 @@ static void force_not_sandboxed(void *loader) {
 				if (handle) \
 					real = dlsym(handle, "gly_" #name); \
 			} \
-			/* never let real point at ourselves, that used to recurse to death */ \
+			/* never let real point at ourselves, that recursed to death */ \
 			if (real == (void *)&gly_##name) \
 				real = NULL; \
 		} \
@@ -207,12 +201,7 @@ GLY_LOADER_WRAPPER(loader_new_for_bytes)
 /*  GSettings backend fix                                             */
 /* ------------------------------------------------------------------ */
 
-/*
- * Portable home/config mode keeps the application settings next to the
- * AppImage, gsettings needs to use the keyfile backend for that or
- * settings end up on the host dconf instead
- * (equivalent of quick-sharun's gsettings-backend.hook)
- */
+/* portable home/config mode, without keyfile settings end up on the host dconf */
 __attribute__((constructor))
 static void fix_gsettings_backend(void) {
 	const char *appimage = getenv("APPIMAGE");
