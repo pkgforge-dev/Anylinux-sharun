@@ -397,7 +397,7 @@ pub fn read_preload(sharun_dir: &str, is_lib32_bin: bool) -> Vec<String> {
 				name.ends_with(".so") || name.contains(".so.")
 			}
 		})
-		.map(|entry| entry.path().into_string().unwrap_or_default())
+		.map(|entry| entry.file_name().to_owned().into_string().unwrap_or_default())
 		.collect();
 		libs.sort();
 		preload.extend(libs);
