@@ -14,9 +14,6 @@
  *
  * USAGE:
  *   GTK_WINDOW_CLASS=fuck.gnome LD_PRELOAD=./gtk-fix-nonsense.so /path/to/app
- *
- * WARNING:
- *  This was 100% vibed with AI by someone that has no idea about C
 */
 
 #define _GNU_SOURCE
@@ -139,11 +136,13 @@ void gdk_window_set_app_id(void *window, const char *app_id) {
 #endif
 
 /*
- * glycin is not always in the global link map, dotnet apps like Pinta
- * load it with dlopen so RTLD_NEXT/RTLD_DEFAULT cannot see it. Reach
- * the already loaded library via dlopen(RTLD_NOLOAD) instead.
- * Without this RTLD_DEFAULT would find this very wrapper and recurse
- * until the stack blew up (Pinta-AppImage#17)
+ * The wrapper can get interposed into processes where no real glycin
+ * is reachable at all: apps may use glycin-ng, which lacks these
+ * symbols entirely, or load real glycin with dlopen (dotnet apps like
+ * Pinta), hiding it from RTLD_NEXT. When RTLD_NEXT fails look for the
+ * already loaded library via dlopen(RTLD_NOLOAD) on its sonames.
+ * The RTLD_DEFAULT fallback used instead would find this very wrapper
+ * and recurse into itself until the stack blew up (Pinta-AppImage#17)
  */
 static void *gly_handle(void) {
 	static void *handle;
