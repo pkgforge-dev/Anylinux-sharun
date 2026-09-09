@@ -5,9 +5,6 @@
  * - Forces the window class / app id to $GTK_WINDOW_CLASS. GNOME uses
  *   a different class in wayland than in x11, breaking desktop
  *   integration of appimages.
- * - Disables the glycin sandbox. glycin does not resolve the full path
- *   of the binaries it passes to bwrap and never checks if bwrap even
- *   exists, it never works inside an AppImage.
  * - Switches gsettings to the keyfile backend when portable
  *   home/config mode is used, otherwise settings end up on the host
  *   dconf.
@@ -28,12 +25,11 @@
 /* ------------------------------------------------------------------ */
 
 /*
- * Reach an already loaded library that RTLD_NEXT cannot see: apps may
- * load their gtk/glib stack with dlopen (dotnet apps like Pinta), and
- * glycin-ng lacks the glycin symbols entirely.
+ * Apps may load their gtk/glib stack with dlopen instead of linking
+ * it (dotnet apps like Pinta), hiding it from RTLD_NEXT. Reach the
+ * already loaded stack via dlopen(RTLD_NOLOAD) on its sonames.
  * RTLD_DEFAULT must never be used here, it would find this very
- * wrapper and recurse into itself until the stack blew up
- * (Pinta-AppImage#17)
+ * wrapper and recurse into itself until the stack blew up.
  */
 static void *loaded_handle(void **cache, const char **sonames) {
 	if (*cache)
@@ -41,18 +37,6 @@ static void *loaded_handle(void **cache, const char **sonames) {
 	for (const char **s = sonames; *s && !*cache; s++)
 		*cache = dlopen(*s, RTLD_LAZY | RTLD_NOLOAD);
 	return *cache;
-}
-
-static void *gly_handle(void) {
-	static void *cache;
-	static const char *sonames[] = {
-		"libglycin-2.so.0",
-		"libglycin-1.so.0",
-		"libglycin.so.0",
-		"libglycin.so",
-		NULL
-	};
-	return loaded_handle(&cache, sonames);
 }
 
 static void *glib_handle(void) {
@@ -75,11 +59,11 @@ static void *glib_handle(void) {
  * every call, the gtk/glib stack may not be loaded yet when we get
  * preloaded.
  */
-static void *real_sym(void *slot[static 1], const char *name, void *(*get_handle)(void)) {
+static void *real_sym(void *slot[static 1], const char *name) {
 	if (!*slot) {
 		*slot = dlsym(RTLD_NEXT, name);
 		if (!*slot) {
-			void *handle = get_handle();
+			void *handle = glib_handle();
 			if (handle)
 				*slot = dlsym(handle, name);
 		}
@@ -128,7 +112,7 @@ GApplication *g_application_new(const char *application_id, GApplicationFlags fl
 	gtk_init();
 	GApplication *(*real)(const char *, GApplicationFlags) =
 		(GApplication *(*)(const char *, GApplicationFlags))
-		real_sym(&real_g_application_new, "g_application_new", glib_handle);
+		real_sym(&real_g_application_new, "g_application_new");
 	return real ? real(effective_id(application_id), flags) : NULL;
 }
 
@@ -136,7 +120,7 @@ GApplication *gtk_application_new(const char *application_id, GApplicationFlags 
 	gtk_init();
 	GApplication *(*real)(const char *, GApplicationFlags) =
 		(GApplication *(*)(const char *, GApplicationFlags))
-		real_sym(&real_gtk_application_new, "gtk_application_new", glib_handle);
+		real_sym(&real_gtk_application_new, "gtk_application_new");
 	return real ? real(effective_id(application_id), flags) : NULL;
 }
 
@@ -144,7 +128,7 @@ void g_application_set_application_id(GApplication *app, const char *application
 	gtk_init();
 	void (*real)(GApplication *, const char *) =
 		(void (*)(GApplication *, const char *))
-		real_sym(&real_g_application_set_application_id, "g_application_set_application_id", glib_handle);
+		real_sym(&real_g_application_set_application_id, "g_application_set_application_id");
 	if (real)
 		real(app, effective_id(application_id));
 }
@@ -153,7 +137,7 @@ void g_set_prgname(const char *prgname) {
 	gtk_init();
 	void (*real)(const char *) =
 		(void (*)(const char *))
-		real_sym(&real_g_set_prgname, "g_set_prgname", glib_handle);
+		real_sym(&real_g_set_prgname, "g_set_prgname");
 	if (real)
 		real(effective_id(prgname));
 }
@@ -163,7 +147,7 @@ const char *g_application_get_application_id(GApplication *app) {
 	if (override_id) return override_id;
 	const char *(*real)(GApplication *) =
 		(const char *(*)(GApplication *))
-		real_sym(&real_g_application_get_application_id, "g_application_get_application_id", glib_handle);
+		real_sym(&real_g_application_get_application_id, "g_application_get_application_id");
 	return real ? real(app) : NULL;
 }
 
@@ -172,7 +156,7 @@ const char *g_get_prgname(void) {
 	if (override_id) return override_id;
 	const char *(*real)(void) =
 		(const char *(*)(void))
-		real_sym(&real_g_get_prgname, "g_get_prgname", glib_handle);
+		real_sym(&real_g_get_prgname, "g_get_prgname");
 	return real ? real() : NULL;
 }
 
@@ -180,7 +164,7 @@ void gdk_surface_set_app_id(void *surface, const char *app_id) {
 	gtk_init();
 	void (*real)(void *, const char *) =
 		(void (*)(void *, const char *))
-		real_sym(&real_gdk_surface_set_app_id, "gdk_surface_set_app_id", glib_handle);
+		real_sym(&real_gdk_surface_set_app_id, "gdk_surface_set_app_id");
 	if (real)
 		real(surface, effective_id(app_id));
 }
@@ -189,7 +173,7 @@ void gdk_wayland_window_set_app_id(void *window, const char *app_id) {
 	gtk_init();
 	void (*real)(void *, const char *) =
 		(void (*)(void *, const char *))
-		real_sym(&real_gdk_wayland_window_set_app_id, "gdk_wayland_window_set_app_id", glib_handle);
+		real_sym(&real_gdk_wayland_window_set_app_id, "gdk_wayland_window_set_app_id");
 	if (real)
 		real(window, effective_id(app_id));
 }
@@ -198,42 +182,10 @@ void gdk_window_set_app_id(void *window, const char *app_id) {
 	gtk_init();
 	void (*real)(void *, const char *) =
 		(void (*)(void *, const char *))
-		real_sym(&real_gdk_window_set_app_id, "gdk_window_set_app_id", glib_handle);
+		real_sym(&real_gdk_window_set_app_id, "gdk_window_set_app_id");
 	if (real)
 		real(window, effective_id(app_id));
 }
-
-/* ------------------------------------------------------------------ */
-/*  Glycin sandbox disable                                            */
-/* ------------------------------------------------------------------ */
-
-#ifndef GLY_SANDBOX_SELECTOR_NOT_SANDBOXED
-#define GLY_SANDBOX_SELECTOR_NOT_SANDBOXED 3
-#endif
-
-static void *real_gly_loader_set_sandbox_selector;
-
-static void force_not_sandboxed(void *loader) {
-	if (!loader) return;
-	void (*set_sandbox)(void *, int) =
-		(void (*)(void *, int))
-		real_sym(&real_gly_loader_set_sandbox_selector, "gly_loader_set_sandbox_selector", gly_handle);
-	if (set_sandbox)
-		set_sandbox(loader, GLY_SANDBOX_SELECTOR_NOT_SANDBOXED);
-}
-
-#define GLY_LOADER_WRAPPER(name) \
-	void* gly_##name(void* arg) { \
-		static void *real; \
-		void *(*fn)(void*) = (void *(*)(void*)) real_sym(&real, "gly_" #name, gly_handle); \
-		void *loader = fn ? fn(arg) : NULL; \
-		force_not_sandboxed(loader); \
-		return loader; \
-	}
-
-GLY_LOADER_WRAPPER(loader_new)
-GLY_LOADER_WRAPPER(loader_new_for_stream)
-GLY_LOADER_WRAPPER(loader_new_for_bytes)
 
 /* ------------------------------------------------------------------ */
 /*  GSettings backend fix                                             */
@@ -268,7 +220,7 @@ static void gtk_class_fix_ctor(void) {
 	if (override_id) {
 		void (*real)(const char *) =
 			(void (*)(const char *))
-			real_sym(&real_g_set_prgname, "g_set_prgname", glib_handle);
+			real_sym(&real_g_set_prgname, "g_set_prgname");
 		if (real)
 			real(override_id);
 	}
