@@ -243,8 +243,19 @@ pub fn get_elf(path: &String, is_elf32: bool) -> Result<Vec<u8>> {
 	} else {
 		let mut elf_header_raw = [0; 64];
 		file.read_exact(&mut elf_header_raw)?;
-		let section_table_offset = u64::from_le_bytes(elf_header_raw[40..48].try_into().unwrap_or_default()); // e_shoff
-		let section_count = u16::from_le_bytes(elf_header_raw[60..62].try_into().unwrap_or_default()); // e_shnum
+		// e_shoff and e_shnum are stored in the file endianness, EI_DATA
+		// at byte 5 of e_ident tells which one it is (2 = big endian)
+		let (section_table_offset, section_count) = if elf_header_raw[5] == 2 {
+			(
+				u64::from_be_bytes(elf_header_raw[40..48].try_into().unwrap_or_default()),
+				u16::from_be_bytes(elf_header_raw[60..62].try_into().unwrap_or_default()),
+			)
+		} else {
+			(
+				u64::from_le_bytes(elf_header_raw[40..48].try_into().unwrap_or_default()),
+				u16::from_le_bytes(elf_header_raw[60..62].try_into().unwrap_or_default()),
+			)
+		}; // e_shoff, e_shnum
 		let section_table_size = section_count as u64 * 64;
 		let required_bytes = section_table_offset + section_table_size;
 		let mut headers_bytes = vec![0; required_bytes as usize];
@@ -495,4 +506,49 @@ pub fn get_ld_cache_dirs(cache_file: &str) -> String {
 		out.push_str(dir);
 	}
 	out
+}
+
+#[cfg(test)]
+mod tests {
+	use super::get_elf;
+
+	// minimal ELF64 file, a two entry section table sits at the end and
+	// e_shoff/e_shnum are written in the requested endianness, get_elf
+	// must read those two fields in the matching byte order
+	fn elf64(be: bool) -> Vec<u8> {
+		let mut b = vec![0u8; 192];
+		b[0..4].copy_from_slice(b"\x7fELF");
+		b[4] = 2; // ELFCLASS64
+		b[5] = if be { 2 } else { 1 }; // ELFDATA2MSB / ELFDATA2LSB
+		b[6] = 1; // EV_CURRENT
+		let (shoff, shnum) = (64u64, 2u16);
+		let (shoff_be, shnum_be) = (shoff.to_be_bytes(), shnum.to_be_bytes());
+		let (shoff_le, shnum_le) = (shoff.to_le_bytes(), shnum.to_le_bytes());
+		if be {
+			b[40..48].copy_from_slice(&shoff_be);
+			b[60..62].copy_from_slice(&shnum_be);
+		} else {
+			b[40..48].copy_from_slice(&shoff_le);
+			b[60..62].copy_from_slice(&shnum_le);
+		}
+		b
+	}
+
+	#[test]
+	fn get_elf_little_endian() {
+		let path = std::env::temp_dir().join("sharun-test-elf64le");
+		std::fs::write(&path, elf64(false)).unwrap();
+		let bytes = get_elf(&path.to_string_lossy().to_string(), false).unwrap();
+		assert_eq!(bytes.len(), 192);
+		std::fs::remove_file(&path).unwrap();
+	}
+
+	#[test]
+	fn get_elf_big_endian() {
+		let path = std::env::temp_dir().join("sharun-test-elf64be");
+		std::fs::write(&path, elf64(true)).unwrap();
+		let bytes = get_elf(&path.to_string_lossy().to_string(), false).unwrap();
+		assert_eq!(bytes.len(), 192);
+		std::fs::remove_file(&path).unwrap();
+	}
 }
