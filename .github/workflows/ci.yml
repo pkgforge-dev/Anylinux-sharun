@@ -19,26 +19,38 @@ jobs:
             env: X86_64_UNKNOWN_LINUX_MUSL
             triple: x86_64-unknown-linux-musl
             zigtarget: x86_64-linux-musl
+            glibctarget: x86_64-linux-gnu.2.31
+            glibc: 2.31
           - arch: aarch64
             env: AARCH64_UNKNOWN_LINUX_MUSL
             triple: aarch64-unknown-linux-musl
             zigtarget: aarch64-linux-musl
+            glibctarget: aarch64-linux-gnu.2.31
+            glibc: 2.31
           - arch: riscv64
             env: RISCV64GC_UNKNOWN_LINUX_MUSL
             triple: riscv64gc-unknown-linux-musl
             zigtarget: riscv64-linux-musl
+            glibctarget: riscv64-linux-gnu.2.31
+            glibc: 2.31
           - arch: ppc64
             env: POWERPC64_UNKNOWN_LINUX_MUSL
             triple: powerpc64-unknown-linux-musl
             zigtarget: powerpc64-linux-musl
+            glibctarget: powerpc64-linux-gnu.2.31
+            glibc: 2.31
           - arch: ppc64le
             env: POWERPC64LE_UNKNOWN_LINUX_MUSL
             triple: powerpc64le-unknown-linux-musl
             zigtarget: powerpc64le-linux-musl
+            glibctarget: powerpc64le-linux-gnu.2.31
+            glibc: 2.31
           - arch: loongarch64
             env: LOONGARCH64_UNKNOWN_LINUX_MUSL
             triple: loongarch64-unknown-linux-musl
             zigtarget: loongarch64-linux-musl
+            glibctarget: loongarch64-linux-gnu.2.36
+            glibc: 2.36
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -91,15 +103,83 @@ jobs:
           make -C super-strip
           ./super-strip/sstrip "sharun-${{ matrix.arch }}"
 
+      # Build the quick-sharun preload libs against an old glibc floor so
+      # they load with any glibc >= the floor (2.36 is the minimum for
+      # loongarch64, glibc never supported that arch before it)
+      - name: Build libs
+        run: |
+          export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
+          export ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
+          make -C lib CC="$RUNNER_TEMP/zig/zig cc -target ${{ matrix.glibctarget }}" LDFLAGS=-s
+
+      - name: Verify libs
+        run: |
+          floor="GLIBC_${{ matrix.glibc }}"
+          for so in lib/*.so; do
+            max=$(objdump -T "$so" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+            high=$(printf '%s\n' "$floor" "$max" | sort -uV | tail -n 1)
+            echo "$so: needs at most ${max:-none} (floor: $floor)"
+            if [ "$high" != "$floor" ]; then
+              echo "ERROR: $so requires $max, which is newer than the floor $floor" >&2
+              exit 1
+            fi
+            # No lib may hold link-time references to symbols of any bundled
+            # library, only libc and libdl imports are allowed. A stray one is
+            # fatal on apps that do not ship that library, this is what broke
+            # Pinta when the glycin fix was part of gtk-class-fix.so
+            # https://github.com/pkgforge-dev/Pinta-AppImage/issues/17
+            # Weak symbols are matched too, the CRT artifacts they add are
+            # whitelisted below
+            bad=$(objdump -T "$so" | awk '
+              $0 ~ /\*UND\*/ {
+                name = $NF;
+                if (name ~ /^(_ITM_|__gmon_start__)/) next;
+                if ($(NF-1) ~ /^\(GLIBC_/) next;
+                if (name ~ /^dl/) next;
+                print name
+              }' | sort -u)
+            if [ -n "$bad" ]; then
+              echo "ERROR: $so has link-time references to non-libc symbols:" >&2
+              echo "$bad" | sed 's/^/  /' >&2
+              exit 1
+            fi
+          done
+
+      # Single tar with sharun + the libs so consumers (quick-sharun) can
+      # grab everything in one download without building on the host.
+      # Flat layout on purpose, no nested directory and no leading ./
+      # Files inside carry no arch, the tar name already has it
+      - name: Package
+        run: |
+          mkdir pkg
+          cp "sharun-${{ matrix.arch }}" pkg/sharun
+          cp lib/*.so pkg/
+          tar_name="sharun+helper-libs-${{ matrix.arch }}.tar"
+          ( cd pkg && tar -cf "../$tar_name" -- * )
+          rm -rf pkg
+          if tar -tf "$tar_name" | grep -q '/'; then
+            echo "ERROR: tar contains nested paths" >&2
+            exit 1
+          fi
+          tar -tvf "$tar_name"
+          sha256sum "sharun-${{ matrix.arch }}" > "sharun-${{ matrix.arch }}.sha256"
+          sha256sum "$tar_name" > "$tar_name.sha256"
+          cat *.sha256
+
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sharun-${{ matrix.arch }}
-          path: sharun-${{ matrix.arch }}
+          path: |
+            sharun-${{ matrix.arch }}
+            sharun-${{ matrix.arch }}.sha256
+            sharun+helper-libs-${{ matrix.arch }}.tar
+            sharun+helper-libs-${{ matrix.arch }}.tar.sha256
 
   release:
     name: Draft release
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -135,4 +215,6 @@ jobs:
           draft: true
           generate_release_notes: true
           make_latest: true
-          files: sharun-*
+          files: |
+            sharun-*
+            sharun+helper-libs-*

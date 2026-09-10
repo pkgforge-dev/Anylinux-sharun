@@ -4,3 +4,4 @@ Cargo.lock
 test
 sharun*
 wrappe*
+lib/*.so

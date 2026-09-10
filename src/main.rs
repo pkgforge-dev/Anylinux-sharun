@@ -282,6 +282,14 @@ fn main() {
 
 	drop(lib_path_data);
 
+	// the sharun-preload dir is part of the search path so the --preload
+	// flag and the .preload file can use bare names instead of full paths
+	let lib_dir = if is_elf32_bin { "lib32" } else { "lib" };
+	let preload_dir = &format!("{sharun_dir}/{lib_dir}/sharun-preload");
+	if Path::new(preload_dir).is_dir() {
+		library_path += &format!(":{preload_dir}");
+	}
+
 	let ld_library_path_env = &get_env_var("LD_LIBRARY_PATH");
 	if !ld_library_path_env.is_empty() {
 		library_path += &format!(":{ld_library_path_env}")
@@ -393,7 +401,7 @@ fn main() {
 			interpreter_args.push(CString::new(arg0_path.to_str().unwrap_or_default()).unwrap_or_default())
 		}
 
-		let preload = read_preload(&sharun_dir);
+		let preload = read_preload(&sharun_dir, is_elf32_bin);
 		if !preload.is_empty() {
 			interpreter_args.append(&mut vec![
 				CString::new("--preload").unwrap_or_default(),
@@ -427,7 +435,7 @@ fn main() {
 				exit(1)
 			});
 			env::set_var("LD_LIBRARY_PATH", &library_path);
-			let preload = read_preload(&sharun_dir);
+			let preload = read_preload(&sharun_dir, is_elf32_bin);
 			if !preload.is_empty() {
 				env::set_var("LD_PRELOAD", preload.join(" "));
 			}

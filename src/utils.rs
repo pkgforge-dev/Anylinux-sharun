@@ -4,7 +4,7 @@ use std::{
 	path::{Path, PathBuf},
 	ffi::OsStr,
 	process::{Command, exit},
-	fs::{File, write, read_to_string, read},
+	fs::{File, write, read_to_string, read, read_dir},
 	os::unix::{fs::{MetadataExt, PermissionsExt}, process::CommandExt},
 	io::{Read, Result, Error, BufRead, BufReader, ErrorKind::{InvalidData, NotFound}}
 };
@@ -362,16 +362,54 @@ pub fn read_dotenv(dotenv_dir: &str) -> Vec<String> {
 	unset_envs
 }
 
-pub fn read_preload(sharun_dir: &str) -> Vec<String> {
+pub fn read_preload(sharun_dir: &str, is_lib32_bin: bool) -> Vec<String> {
+	let mut preload: Vec<String> = Vec::new();
+
+	// the classic .preload file with the names of the libraries to preload
 	let preload_path = PathBuf::from(format!("{sharun_dir}/.preload"));
-	if !preload_path.exists() {
-		return vec![];
+	if preload_path.exists() {
+		let data = read_to_string(&preload_path).unwrap_or_else(|err|{
+			eprintln!("Failed to read .preload file: {}: {err}", preload_path.display());
+			exit(1)
+		});
+		preload.extend(
+			data.trim().split("\n")
+				.map(|s| s.trim().into())
+				.filter(|s: &String| !s.is_empty())
+		);
 	}
-	let data = read_to_string(&preload_path).unwrap_or_else(|err|{
-		eprintln!("Failed to read .preload file: {}: {err}", preload_path.display());
-		exit(1)
-	});
-	data.trim().split("\n").map(|s| s.trim().into()).filter(|s: &String| !s.is_empty()).collect()
+
+	// every library found in $SHARUN_DIR/lib{,32}/sharun-preload is
+	// preloaded automatically, no need to keep a .preload file with the
+	// names. The name is sharun specific on purpose to prevent collisions
+	// with apps that have their own 'preload' dir with unrelated content
+	let lib_dir = if is_lib32_bin { "lib32" } else { "lib" };
+	let preload_dir = PathBuf::from(format!("{sharun_dir}/{lib_dir}/sharun-preload"));
+	if preload_dir.is_dir() {
+		let mut libs: Vec<String> = read_dir(&preload_dir).unwrap_or_else(|err| {
+			eprintln!("Failed to read '{lib_dir}/sharun-preload/' dir: {preload_dir:?}: {err}");
+			exit(1)
+		})
+		.filter_map(|entry| entry.ok())
+		.filter(|entry| {
+			entry.path().is_file() && {
+				let name = entry.file_name().to_owned().into_string().unwrap_or_default();
+				name.ends_with(".so") || name.contains(".so.")
+			}
+		})
+		.map(|entry| entry.file_name().to_owned().into_string().unwrap_or_default())
+		.collect();
+		libs.sort();
+		preload.extend(libs);
+	}
+
+	// path-mapping.so is shipped together with the other helper libraries
+	// but is only useful when PATH_MAPPING is set, keep it out otherwise
+	if get_env_var("PATH_MAPPING").is_empty() {
+		preload.retain(|lib| basename(lib) != "path-mapping.so");
+	}
+
+	preload
 }
 
 pub fn add_to_xdg_data_env(xdg_data_dirs: &str, env: &str, path: &str) {
