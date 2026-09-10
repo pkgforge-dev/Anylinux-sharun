@@ -128,7 +128,16 @@ jobs:
             # fatal on apps that do not ship that library, this is what broke
             # Pinta when the glycin fix was part of gtk-class-fix.so
             # https://github.com/pkgforge-dev/Pinta-AppImage/issues/17
-            bad=$(objdump -T "$so" | awk '$3=="*UND*"{ if (NF==6 && $5!~/^\(GLIBC_/ && $6!~/^dl/) print $6; else if (NF==5 && $5!~/^dl/) print $5 }' | sort -u)
+            # Weak symbols are matched too, the CRT artifacts they add are
+            # whitelisted below
+            bad=$(objdump -T "$so" | awk '
+              $0 ~ /\*UND\*/ {
+                name = $NF;
+                if (name ~ /^(_ITM_|__gmon_start__)/) next;
+                if ($(NF-1) ~ /^\(GLIBC_/) next;
+                if (name ~ /^dl/) next;
+                print name
+              }' | sort -u)
             if [ -n "$bad" ]; then
               echo "ERROR: $so has link-time references to non-libc symbols:" >&2
               echo "$bad" | sed 's/^/  /' >&2

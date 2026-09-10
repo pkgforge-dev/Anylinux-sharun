@@ -15,6 +15,10 @@ all: $(LIBS)
 
 # path-mapping.c includes its common header
 path-mapping.so: path-mapping.c pathmap_common.h
+# statmount needs a modern glibc/kernel header pair to compile and a
+# runtime libc that wraps the syscall, with the 2.31 floor the wrapper
+# could crash calling a null dlsym pointer, e.g. glibc < 2.39
+path-mapping.so: CFLAGS += -DDISABLE_STATMOUNT
 
 %.so: %.c
 	$(CC) $(SOFLAGS) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LDLIBS)
