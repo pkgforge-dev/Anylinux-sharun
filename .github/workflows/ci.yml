@@ -94,7 +94,7 @@ jobs:
           export RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=no"
           export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
           export ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
-          cargo build --release --target ${{ matrix.triple }}
+          cargo build --release --bin sharun --target ${{ matrix.triple }}
           mv "target/${{ matrix.triple }}/release/sharun" "sharun-${{ matrix.arch }}"
 
       - name: Strip
@@ -141,6 +141,22 @@ jobs:
             if [ -n "$bad" ]; then
               echo "ERROR: $so has link-time references to non-libc symbols:" >&2
               echo "$bad" | sed 's/^/  /' >&2
+              exit 1
+            fi
+          done
+
+      # ppc64 (BE) bundles archlinuxpower's ELFv2 glibc, which lacks the
+      # ELFv1 versions zig records, so ship the preloads unversioned:
+      # https://github.com/pkgforge-dev/Anylinux-sharun/issues/11
+      - name: Unversion libs
+        if: matrix.arch == 'ppc64'
+        run: |
+          cargo build --release --bin unversion --target x86_64-unknown-linux-gnu
+          make -C lib unversion \
+            UNVERSION="$GITHUB_WORKSPACE/target/x86_64-unknown-linux-gnu/release/unversion"
+          for so in lib/*.so; do
+            if readelf -d "$so" | grep -qE '\((VERSYM|VERNEED|VERNEEDNUM)\)'; then
+              echo "ERROR: $so still requires a GLIBC version" >&2
               exit 1
             fi
           done
