@@ -24,7 +24,7 @@ path-mapping.so: CFLAGS += -DDISABLE_STATMOUNT
 	$(CC) $(SOFLAGS) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LDLIBS)
 
 # ppc64 (BE) only: zig's ELFv1 symbol versions (GLIBC_2.3/2.4) are not in
-# archlinuxpower's ELFv2 glibc, so we ship unversioned preloads instead.
+# archlinuxpower's ELFv2 glibc, so strip the preloads' version requirements.
 # UNVERSION points at the `unversion` cargo bin (see tools/unversion.rs)
 # https://github.com/pkgforge-dev/Anylinux-sharun/issues/11
 UNVERSION ?= unversion

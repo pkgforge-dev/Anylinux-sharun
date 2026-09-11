@@ -146,7 +146,7 @@ jobs:
           done
 
       # ppc64 (BE) bundles archlinuxpower's ELFv2 glibc, which lacks the
-      # ELFv1 versions zig records, so ship the preloads unversioned:
+      # ELFv1 versions zig records, so strip the preloads' version needs:
       # https://github.com/pkgforge-dev/Anylinux-sharun/issues/11
       - name: Unversion libs
         if: matrix.arch == 'ppc64'
