@@ -94,7 +94,7 @@ jobs:
           export RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=no"
           export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
           export ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
-          cargo build --release --bin sharun --target ${{ matrix.triple }}
+          cargo build --release --target ${{ matrix.triple }}
           mv "target/${{ matrix.triple }}/release/sharun" "sharun-${{ matrix.arch }}"
 
       - name: Strip
