@@ -146,19 +146,21 @@ jobs:
           done
 
       # ppc64 (BE) bundles archlinuxpower's ELFv2 glibc, which lacks the
-      # ELFv1 versions zig records, so strip the preloads' version needs:
+      # ELFv1 versions zig records, so bump them to the ELFv2 baseline:
       # https://github.com/pkgforge-dev/Anylinux-sharun/issues/11
-      - name: Unversion libs
+      - name: Fix versions
         if: matrix.arch == 'ppc64'
         run: |
-          cargo build --release --bin unversion --target x86_64-unknown-linux-gnu
-          make -C lib unversion \
-            UNVERSION="$GITHUB_WORKSPACE/target/x86_64-unknown-linux-gnu/release/unversion"
+          cargo build --release --bin fix-versions --target x86_64-unknown-linux-gnu
+          make -C lib fix-versions \
+            FIX_VERSIONS="$GITHUB_WORKSPACE/target/x86_64-unknown-linux-gnu/release/fix-versions"
           for so in lib/*.so; do
-            if readelf -d "$so" | grep -qE '\((VERSYM|VERNEED|VERNEEDNUM)\)'; then
-              echo "ERROR: $so still requires a GLIBC version" >&2
-              exit 1
-            fi
+            for v in $(objdump -T "$so" | grep -oE 'GLIBC_[0-9.]+' | sort -uV); do
+              if [ "$(printf '%s\n' GLIBC_2.17 "$v" | sort -uV | head -n1)" != "GLIBC_2.17" ]; then
+                echo "ERROR: $so still requires $v" >&2
+                exit 1
+              fi
+            done
           done
 
       # Single tar with sharun + the libs so consumers (quick-sharun) can

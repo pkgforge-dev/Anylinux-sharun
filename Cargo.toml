@@ -10,8 +10,8 @@ description = "Run dynamically linked ELF binaries everywhere"
 edition = "2021"
 
 [[bin]]
-name = "unversion"
-path = "tools/unversion.rs"
+name = "fix-versions"
+path = "tools/fix-versions.rs"
 
 [profile.release]
 lto = true

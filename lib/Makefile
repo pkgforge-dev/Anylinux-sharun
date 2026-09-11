@@ -23,15 +23,15 @@ path-mapping.so: CFLAGS += -DDISABLE_STATMOUNT
 %.so: %.c
 	$(CC) $(SOFLAGS) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LDLIBS)
 
-# ppc64 (BE) only: zig's ELFv1 symbol versions (GLIBC_2.3/2.4) are not in
-# archlinuxpower's ELFv2 glibc, so strip the preloads' version requirements.
-# UNVERSION points at the `unversion` cargo bin (see tools/unversion.rs)
+# ppc64 (BE) only: zig records the ELFv1 versions (GLIBC_2.3/2.4) that
+# archlinuxpower's ELFv2 glibc does not define, so bump them to GLIBC_2.17.
+# FIX_VERSIONS points at the `fix-versions` cargo bin (see tools/fix-versions.rs)
 # https://github.com/pkgforge-dev/Anylinux-sharun/issues/11
-UNVERSION ?= unversion
-unversion: $(LIBS)
-	$(UNVERSION) $(LIBS)
+FIX_VERSIONS ?= fix-versions
+fix-versions: $(LIBS)
+	$(FIX_VERSIONS) $(LIBS)
 
 clean:
 	rm -f $(LIBS)
 
-.PHONY: all unversion clean
+.PHONY: all fix-versions clean
