@@ -103,6 +103,19 @@ jobs:
           make -C super-strip
           ./super-strip/sstrip "sharun-${{ matrix.arch }}"
 
+      # ppc64 (BE) is ELFv2 but zig's powerpc64-linux-gnu glibc stub is the
+      # ELFv1 one (GLIBC_2.3/2.4), which archlinuxpower's glibc does not
+      # define. Build a BE copy of zig's ppc64le ELFv2 stub and link the
+      # preloads against it, see tools/gen-elfv2-stubs.sh
+      # https://github.com/pkgforge-dev/Anylinux-sharun/issues/11
+      - name: Gen ppc64 ELFv2 stubs
+        if: matrix.arch == 'ppc64'
+        run: |
+          export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
+          export ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
+          sh tools/gen-elfv2-stubs.sh "$RUNNER_TEMP/zig/zig" "${{ matrix.glibc }}" "$RUNNER_TEMP/ppc64-stub"
+          echo "PPC64_ELFV2_STUB=$RUNNER_TEMP/ppc64-stub" >> "$GITHUB_ENV"
+
       # Build the quick-sharun preload libs against an old glibc floor so
       # they load with any glibc >= the floor (2.36 is the minimum for
       # loongarch64, glibc never supported that arch before it)
@@ -123,18 +136,29 @@ jobs:
               echo "ERROR: $so requires $max, which is newer than the floor $floor" >&2
               exit 1
             fi
+            if [ "${{ matrix.arch }}" = ppc64 ]; then
+              # ppc64 bundles archlinuxpower's ELFv2 glibc, whose lowest
+              # version is 2.17; an ELFv1 name would be fatal at launch
+              # https://github.com/pkgforge-dev/Anylinux-sharun/issues/11
+              min=$(objdump -T "$so" | grep -o 'GLIBC_[0-9.]*' | sort -uV | head -n 1)
+              if [ "$(printf '%s\n' GLIBC_2.17 "${min:-GLIBC_2.17}" | sort -uV | head -n 1)" != "GLIBC_2.17" ]; then
+                echo "ERROR: $so requires ${min}, older than GLIBC_2.17" >&2
+                exit 1
+              fi
+            fi
             # No lib may hold link-time references to symbols of any bundled
             # library, only libc and libdl imports are allowed. A stray one is
             # fatal on apps that do not ship that library, this is what broke
             # Pinta when the glycin fix was part of gtk-class-fix.so
             # https://github.com/pkgforge-dev/Pinta-AppImage/issues/17
             # Weak symbols are matched too, the CRT artifacts they add are
-            # whitelisted below
+            # whitelisted below. The whole line is matched because ppc64 ELFv2
+            # prints an extra localentry column between the version and name
             bad=$(objdump -T "$so" | awk '
               $0 ~ /\*UND\*/ {
                 name = $NF;
                 if (name ~ /^(_ITM_|__gmon_start__)/) next;
-                if ($(NF-1) ~ /^\(GLIBC_/) next;
+                if ($0 ~ /\(GLIBC_/) next;
                 if (name ~ /^dl/) next;
                 print name
               }' | sort -u)
