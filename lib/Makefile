@@ -20,18 +20,25 @@ path-mapping.so: path-mapping.c pathmap_common.h
 # could crash calling a null dlsym pointer, e.g. glibc < 2.39
 path-mapping.so: CFLAGS += -DDISABLE_STATMOUNT
 
+# ppc64 (BE) only: zig's powerpc64-linux-gnu stub is the ELFv1 one
+# (GLIBC_2.3/2.4) which archlinuxpower's glibc does not define. Link against
+# a BE build of zig's ppc64le ELFv2 stub instead, see tools/gen-elfv2-stubs.sh
+# https://github.com/pkgforge-dev/Anylinux-sharun/issues/11
+PPC64_ELFV2_STUB ?=
+
+ifneq ($(PPC64_ELFV2_STUB),)
+PPC64_ELFV2_STUBS = $(PPC64_ELFV2_STUB)/libc.so.6 $(wildcard $(PPC64_ELFV2_STUB)/libdl.so.2)
+
+%.so: %.c
+	$(CC) $(CFLAGS) -fPIC -c $< -o $*.o
+	$(CC) -shared -nostdlib $(LDFLAGS) $*.o $(PPC64_ELFV2_STUBS) -o $@
+	rm -f $*.o
+else
 %.so: %.c
 	$(CC) $(SOFLAGS) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LDLIBS)
-
-# ppc64 (BE) only: zig records the ELFv1 versions (GLIBC_2.3/2.4) that
-# archlinuxpower's ELFv2 glibc does not define, so bump them to GLIBC_2.17.
-# FIX_VERSIONS points at the `fix-versions` cargo bin (see tools/fix-versions.rs)
-# https://github.com/pkgforge-dev/Anylinux-sharun/issues/11
-FIX_VERSIONS ?= fix-versions
-fix-versions: $(LIBS)
-	$(FIX_VERSIONS) $(LIBS)
+endif
 
 clean:
-	rm -f $(LIBS)
+	rm -f $(LIBS) *.o
 
-.PHONY: all fix-versions clean
+.PHONY: all clean

@@ -9,10 +9,6 @@ repository = "https://github.com/pkgforge-dev/Anylinux-sharun"
 description = "Run dynamically linked ELF binaries everywhere"
 edition = "2021"
 
-[[bin]]
-name = "fix-versions"
-path = "tools/fix-versions.rs"
-
 [profile.release]
 lto = true
 opt-level = "z"
