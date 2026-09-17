@@ -107,6 +107,7 @@ fn syscall_missing(nr: libc::c_long) -> bool {
 /// Run `apprun::run_as_apprun` for `(sharun_dir, bin_dir, exec_args)` under the
 /// tracer. Never returns.
 pub fn run_apprun_traced(sharun_dir: &str, bin_dir: &str, exec_args: &[String]) -> ! {
+	eprintln!("[sharun] enabled old kernel compatibility mode");
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
 			if let Err(err) = ptrace::traceme() {
