@@ -107,22 +107,41 @@ fn syscall_missing(nr: libc::c_long) -> bool {
 /// Run `apprun::run_as_apprun` for `(sharun_dir, bin_dir, exec_args)` under the
 /// tracer. Never returns.
 pub fn run_apprun_traced(sharun_dir: &str, bin_dir: &str, exec_args: &[String]) -> ! {
+	// If ptrace is blocked (e.g. a container's seccomp policy), don't turn a
+	// runnable app into a failure: run it untraced, exactly as if this layer
+	// were disabled. On a genuinely ancient kernel glibc dies on its own, which
+	// is no worse than running without the feature.
+	if !ptrace_permitted() {
+		eprintln!("[sharun] ptrace unavailable, running without old kernel compatibility");
+		crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args);
+	}
 	eprintln!("[sharun] enabled old kernel compatibility mode");
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
-			if let Err(err) = ptrace::traceme() {
-				eprintln!("kernel-compat: PTRACE_TRACEME failed: {err}");
-				exit(1);
+			if ptrace::traceme().is_err() {
+				crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args)
 			}
 			// Let the parent install PTRACE_SETOPTIONS before we run.
 			let _ = raise(Signal::SIGSTOP);
 			crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args)
 		},
 		Ok(ForkResult::Parent { child }) => supervise(child),
-		Err(err) => {
-			eprintln!("kernel-compat: fork failed: {err}");
-			exit(1);
+		// Could not fork the tracer: run untraced rather than fail.
+		Err(_) => crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args),
+	}
+}
+
+/// Cheap probe for whether `PTRACE_TRACEME` is permitted here.
+fn ptrace_permitted() -> bool {
+	match unsafe { fork() } {
+		Ok(ForkResult::Child) => {
+			let ok = ptrace::traceme().is_ok();
+			exit(if ok { 0 } else { 1 })
 		},
+		Ok(ForkResult::Parent { child }) => {
+			matches!(waitpid(child, None), Ok(WaitStatus::Exited(_, 0)))
+		},
+		Err(_) => false,
 	}
 }
 
@@ -143,29 +162,32 @@ fn install_options(pid: Pid, wanted: &[Options]) -> Options {
 }
 
 fn tracer_options() -> Vec<Options> {
+	// No PTRACE_O_EXITKILL: when the traced main process exits we exit too, and
+	// EXITKILL would SIGKILL any still-traced descendants (e.g. a double-forked
+	// daemon). Without it the kernel detaches them and they keep running.
 	vec![
 		Options::PTRACE_O_TRACESYSGOOD,
 		Options::PTRACE_O_TRACEFORK,
 		Options::PTRACE_O_TRACEVFORK,
 		Options::PTRACE_O_TRACECLONE,
 		Options::PTRACE_O_TRACEEXEC,
-		Options::PTRACE_O_EXITKILL,
 	]
 }
 
 struct Tracer {
 	child: Pid,
-	options: Options,
 	configured: HashSet<Pid>,
 	in_syscall: HashMap<Pid, bool>,
 	last_syscall: HashMap<Pid, u64>,
 	statx: HashMap<Pid, StatxState>,
+	/// rsp to restore at syscall-exit for tracees whose translated syscall
+	/// needed scratch space carved below the stack pointer.
+	reserved: HashMap<Pid, u64>,
 	syscall_mode: bool,
 }
 
 struct StatxState {
 	statxbuf: u64,
-	saved_rsp: u64,
 	scratch: u64,
 }
 
@@ -222,9 +244,10 @@ impl Tracer {
 						self.resume(pid, Some(sig));
 					}
 				},
-				Ok(WaitStatus::PtraceEvent(pid, sig, _event)) => {
-					// Children are configured at their first stop below.
-					self.resume(pid, Some(sig));
+				Ok(WaitStatus::PtraceEvent(pid, _sig, _event)) => {
+					// Restart event stops with signal 0 (like strace does), not
+					// with the synthetic SIGTRAP nix reports for them.
+					self.resume(pid, None);
 				},
 				Ok(WaitStatus::PtraceSyscall(pid)) => {
 					self.on_syscall_stop(pid);
@@ -245,7 +268,7 @@ impl Tracer {
 		let entering = !*self.in_syscall.get(&pid).unwrap_or(&false);
 		self.in_syscall.insert(pid, entering);
 
-		let regs = match ptrace::getregs(pid) {
+		let mut regs = match ptrace::getregs(pid) {
 			Ok(regs) => regs,
 			Err(_) => return,
 		};
@@ -253,11 +276,12 @@ impl Tracer {
 		if entering {
 			self.last_syscall.insert(pid, regs.orig_rax);
 			if regs.orig_rax == libc::SYS_futex as u64 {
-				translate_futex(pid, regs);
+				translate_futex(pid, regs, &mut self.reserved);
 			} else if regs.orig_rax == libc::SYS_pipe2 as u64 {
-				// pipe2 (2.6.27) -> pipe (ancient). Flags are dropped; callers
-				// that need O_NONBLOCK generally set it via fcntl afterwards,
-				// and losing O_CLOEXEC only leaks fds into children.
+				// pipe2 (2.6.27) -> pipe (ancient). The flags argument is lost
+				// entirely: neither O_NONBLOCK nor O_CLOEXEC is applied, and we
+				// cannot fix that from here. Callers that relied on pipe2 to
+				// set those flags will see a blocking, inheritable pipe.
 				let mut patched = regs;
 				patched.orig_rax = libc::SYS_pipe as u64;
 				patched.rax = libc::SYS_pipe as u64;
@@ -269,8 +293,38 @@ impl Tracer {
 				self.setup_statx(pid, regs);
 			}
 		} else {
-			if self.statx.contains_key(&pid) {
-				self.finish_statx(pid, regs);
+			let mut dirty = false;
+			// statx -> newfstatat/fstat: translate the stashed `struct stat`
+			// into `struct statx`, and surface a real error if we can't.
+			if let Some(state) = self.statx.remove(&pid) {
+				if regs.rax == 0 {
+					let ok = read_struct(pid, state.scratch, 144)
+						.map(|stat| build_statx(&stat))
+						.map(|stx| write_struct(pid, state.statxbuf, &stx))
+						.unwrap_or(false);
+					if ok {
+						if debug() {
+							eprintln!("kernel-compat: statx ok");
+						}
+					} else {
+						regs.rax = (-(libc::EFAULT as i64)) as u64;
+						dirty = true;
+					}
+				} else if debug() {
+					eprintln!(
+						"kernel-compat: statx -> fallback ret={} (errno {})",
+						regs.rax as i64,
+						-(regs.rax as i64)
+					);
+				}
+			}
+			// Undo any scratch stack reservation made at syscall entry.
+			if let Some(saved_rsp) = self.reserved.remove(&pid) {
+				regs.rsp = saved_rsp;
+				dirty = true;
+			}
+			if dirty {
+				let _ = ptrace::setregs(pid, regs);
 			}
 			if debug() && regs.rax == (-(libc::ENOSYS as i64)) as u64 {
 				let nr = self.last_syscall.get(&pid).copied().unwrap_or(0);
@@ -295,7 +349,8 @@ impl Tracer {
 			);
 		}
 		let saved_rsp = regs.rsp;
-		let scratch = (saved_rsp.wrapping_sub(256)) & !0xf;
+		// 512 bytes clears the red zone (the struct itself needs 256).
+		let scratch = (saved_rsp.wrapping_sub(512)) & !0xf;
 		// statx(dirfd(rdi), path(rsi), flags(rdx), mask(r10), statxbuf(r8))
 		regs.rsp = scratch;
 		if regs.rdx & 0x1000 != 0 {
@@ -314,37 +369,15 @@ impl Tracer {
 		if ptrace::setregs(pid, regs).is_err() {
 			return
 		}
-		self.statx.insert(pid, StatxState { statxbuf, saved_rsp, scratch });
+		self.reserved.insert(pid, saved_rsp);
+		self.statx.insert(pid, StatxState { statxbuf, scratch });
 		if debug() {
-			eprintln!("kernel-compat: statx -> newfstatat (buf {statxbuf:#x})");
+			eprintln!("kernel-compat: statx -> fallback (buf {statxbuf:#x})");
 		}
-	}
-
-	fn finish_statx(&mut self, pid: Pid, mut regs: libc::user_regs_struct) {
-		let Some(state) = self.statx.remove(&pid) else { return };
-		let ret = regs.rax as i64;
-		if ret == 0 {
-			if let Some(stat) = read_struct(pid, state.scratch, 144) {
-				let stx = build_statx(&stat);
-				let _ = write_struct(pid, state.statxbuf, &stx);
-				if debug() {
-					eprintln!(
-						"kernel-compat: statx ok mode={:#o} size={}",
-						rd_u32(&stat, 24),
-						rd_u64(&stat, 48)
-					);
-				}
-			}
-		} else if debug() {
-			eprintln!("kernel-compat: statx -> newfstatat ret={ret} (errno {})", -ret);
-		}
-		// undo the scratch stack reservation
-		regs.rsp = state.saved_rsp;
-		let _ = ptrace::setregs(pid, regs);
 	}
 }
 
-fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct) {
+fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct, reserved: &mut HashMap<Pid, u64>) {
 	// x86_64: futex(uaddr, op, val, timeout, uaddr2, val3) ->
 	// rdi, rsi, rdx, r10, r8, r9
 	let op = regs.rsi as u32;
@@ -358,15 +391,21 @@ fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct) {
 		FUTEX_WAKE_BITSET => FUTEX_WAKE,
 		other => other,
 	};
-	// 2.6.20 predates FUTEX_PRIVATE_FLAG / FUTEX_CLOCK_REALTIME and the bitset
-	// ops, so hand the kernel a bare command with no flag bits.
+	// Old kernels predate FUTEX_PRIVATE_FLAG / FUTEX_CLOCK_REALTIME and the
+	// bitset ops, so hand the kernel a bare command with no flag bits.
 	if new_cmd == op {
 		return;
 	}
 	if new_cmd == FUTEX_WAIT && (cmd == FUTEX_WAIT_BITSET || realtime) {
 		// FUTEX_WAIT_BITSET (and CLOCK_REALTIME waits) use an absolute timeout;
-		// FUTEX_WAIT wants a relative one.
-		convert_timeout_to_relative(pid, &mut regs, realtime);
+		// FUTEX_WAIT wants a relative one. Compute it in the tracer and point
+		// r10 at scratch memory -- never rewrite the caller's timespec.
+		let saved_rsp = regs.rsp;
+		if let Some(scratch) = reserve_relative_timeout(pid, regs.r10, realtime, saved_rsp) {
+			regs.rsp = scratch;
+			regs.r10 = scratch;
+			reserved.insert(pid, saved_rsp);
+		}
 	}
 	regs.rsi = new_cmd as u64;
 	if let Err(err) = ptrace::setregs(pid, regs) {
@@ -380,18 +419,15 @@ fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct) {
 	}
 }
 
-fn convert_timeout_to_relative(pid: Pid, regs: &mut libc::user_regs_struct, realtime: bool) {
-	// r10 is the timeout pointer (struct timespec, 16 bytes)
-	let addr = regs.r10;
-	if addr == 0 {
-		return
+/// Read the absolute timespec at `timeout_ptr`, convert it to a relative one,
+/// write it to scratch space below `saved_rsp`, and return the scratch address.
+fn reserve_relative_timeout(pid: Pid, timeout_ptr: u64, realtime: bool, saved_rsp: u64) -> Option<u64> {
+	if timeout_ptr == 0 {
+		return None
 	}
-	let read64 = |off: u64| -> Option<i64> {
-		ptrace::read(pid, (addr + off) as AddressType).ok().map(|w| w as i64)
-	};
-	let Some(abs_sec) = read64(0) else { return };
-	let Some(abs_nsec) = read64(8) else { return };
-
+	let raw = read_struct(pid, timeout_ptr, 16)?;
+	let abs_sec = i64::from_le_bytes(raw[0..8].try_into().ok()?);
+	let abs_nsec = i64::from_le_bytes(raw[8..16].try_into().ok()?);
 	let clock = if realtime {
 		libc::CLOCK_REALTIME
 	} else {
@@ -399,7 +435,7 @@ fn convert_timeout_to_relative(pid: Pid, regs: &mut libc::user_regs_struct, real
 	};
 	let mut now: libc::timespec = unsafe { std::mem::zeroed() };
 	if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
-		return
+		return None
 	}
 	let mut sec = abs_sec - now.tv_sec;
 	let mut nsec = abs_nsec - now.tv_nsec;
@@ -411,11 +447,19 @@ fn convert_timeout_to_relative(pid: Pid, regs: &mut libc::user_regs_struct, real
 		sec = 0;
 		nsec = 0;
 	}
-	let _ = ptrace::write(pid, addr as AddressType, sec);
-	let _ = ptrace::write(pid, (addr + 8) as AddressType, nsec);
-	if debug() {
-		eprintln!("kernel-compat: futex timeout {abs_sec}.{abs_nsec} -> {sec}.{nsec} rel");
+	let scratch = (saved_rsp.wrapping_sub(512)) & !0xf;
+	let mut buf = [0u8; 16];
+	buf[0..8].copy_from_slice(&sec.to_le_bytes());
+	buf[8..16].copy_from_slice(&nsec.to_le_bytes());
+	if !write_struct(pid, scratch, &buf) {
+		return None
 	}
+	if debug() {
+		eprintln!(
+			"kernel-compat: futex timeout {abs_sec}.{abs_nsec} -> {sec}.{nsec} rel (scratch {scratch:#x})"
+		);
+	}
+	Some(scratch)
 }
 
 fn peek_word(pid: Pid, addr: u64) -> Option<u64> {
@@ -550,11 +594,11 @@ fn supervise(child: Pid) -> ! {
 	}
 	let mut tracer = Tracer {
 		child,
-		options,
 		configured: HashSet::from([child]),
 		in_syscall: HashMap::new(),
 		last_syscall: HashMap::new(),
 		statx: HashMap::new(),
+		reserved: HashMap::new(),
 		syscall_mode,
 	};
 	tracer.supervise()
