@@ -10,7 +10,7 @@
 //!    return `ENOSYS` and glibc calls `futex_fatal_error()`. We rewrite those
 //!    ops to their older equivalents at syscall-entry.
 //!
-//! Enable with `SHARUN_KERNEL_COMPAT=1`; `0` disables. When unset it decides
+//! Enable with `SHARUN_OLD_KERNEL_COMPAT=1`; `0` disables. When unset it decides
 //! automatically: on for kernels < 2.6.30, or when `statx` (4.11) is missing.
 //!
 //! x86_64 only for now; per-architecture register handling would be required
@@ -31,8 +31,8 @@ use nix::{
 	libc,
 };
 
-const ENV_ENABLE: &str = "SHARUN_KERNEL_COMPAT";
-const ENV_DEBUG: &str = "SHARUN_KERNEL_COMPAT_DEBUG";
+const ENV_ENABLE: &str = "SHARUN_OLD_KERNEL_COMPAT";
+const ENV_DEBUG: &str = "SHARUN_OLD_KERNEL_COMPAT_DEBUG";
 
 // futex op encoding
 const FUTEX_CMD_MASK: u32 = 0x7f;
