@@ -48,7 +48,8 @@ fn print_usage() {
 	                                applications to run on ancient kernels;
 	                                set to 0 to disable, default is automatic
 	                                on kernels older than 4.0 or when statx is missing
-	                                (while active it traces every syscall, so it is slow)
+	                                (on kernels without seccomp-bpf, < 3.5, every
+	                                syscall is traced, which is slow)
 	SHARUN_EXTRA_LIBRARY_PATH      Extra library directories with highest priority
 	SHARUN_FALLBACK_LIBRARY_PATH   Fallback library directories with lowest priority
 	SHARUN_MESA_PATH=/path         External mesa install dir (with lib/ and share/)

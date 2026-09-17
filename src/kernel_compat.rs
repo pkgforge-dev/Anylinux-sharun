@@ -115,17 +115,50 @@ pub fn run_apprun_traced(sharun_dir: &str, bin_dir: &str, exec_args: &[String]) 
 		eprintln!("[sharun] ptrace unavailable, running without old kernel compatibility");
 		crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args);
 	}
-	eprintln!("[sharun] enabled old kernel compatibility mode");
+
+	// Handshake pipe: the child reports whether it could install the seccomp
+	// filter, so the parent knows whether to stop only on the translated
+	// syscalls (seccomp, cheap) or on every syscall (fallback).
+	let mut pipe_fds = [0i32; 2];
+	let have_pipe = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == 0;
+
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
+			if have_pipe {
+				unsafe { libc::close(pipe_fds[0]) };
+			}
 			if ptrace::traceme().is_err() {
+				if have_pipe {
+					unsafe { libc::close(pipe_fds[1]) };
+				}
 				crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args)
+			}
+			let seccomp = install_seccomp_filter();
+			if have_pipe {
+				let byte = [u8::from(seccomp)];
+				unsafe {
+					libc::write(pipe_fds[1], byte.as_ptr() as *const libc::c_void, 1);
+					libc::close(pipe_fds[1]);
+				}
 			}
 			// Let the parent install PTRACE_SETOPTIONS before we run.
 			let _ = raise(Signal::SIGSTOP);
 			crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args)
 		},
-		Ok(ForkResult::Parent { child }) => supervise(child),
+		Ok(ForkResult::Parent { child }) => {
+			let mut use_seccomp = false;
+			if have_pipe {
+				unsafe { libc::close(pipe_fds[1]) };
+				let mut byte = [0u8; 1];
+				let n = unsafe {
+					libc::read(pipe_fds[0], byte.as_mut_ptr() as *mut libc::c_void, 1)
+				};
+				use_seccomp = n == 1 && byte[0] == 1;
+				unsafe { libc::close(pipe_fds[0]) };
+			}
+			eprintln!("[sharun] enabled old kernel compatibility mode");
+			supervise(child, use_seccomp)
+		},
 		// Could not fork the tracer: run untraced rather than fail.
 		Err(_) => crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args),
 	}
@@ -145,6 +178,47 @@ fn ptrace_permitted() -> bool {
 	}
 }
 
+/// Install a seccomp-bpf filter that has the tracer stop (`SECCOMP_RET_TRACE`)
+/// on only the syscalls we rewrite, allowing everything else. Requires Linux
+/// 3.5+; returns false on older kernels or where seccomp is unavailable, in
+/// which case the caller falls back to tracing every syscall.
+#[cfg(target_arch = "x86_64")]
+fn install_seccomp_filter() -> bool {
+	const BPF_LD_W_ABS: u16 = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+	const BPF_JEQ_K: u16 = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
+	const BPF_RET_K: u16 = (libc::BPF_RET | libc::BPF_K) as u16;
+	// ELF machine for x86_64 (libc does not export AUDIT_ARCH_X86_64 here).
+	const AUDIT_ARCH_X86_64: u32 = 0xc000003e;
+	let stmt = |code: u16, k: u32| libc::sock_filter { code, jt: 0, jf: 0, k };
+	let jump = |k: u32, jt: u8, jf: u8| libc::sock_filter { code: BPF_JEQ_K, jt, jf, k };
+	let filter = [
+		stmt(BPF_LD_W_ABS, 4), // seccomp_data.arch
+		jump(AUDIT_ARCH_X86_64, 1, 0),
+		stmt(BPF_RET_K, libc::SECCOMP_RET_ALLOW),
+		stmt(BPF_LD_W_ABS, 0), // seccomp_data.nr
+		jump(libc::SYS_futex as u32, 2, 0),
+		jump(libc::SYS_pipe2 as u32, 1, 0),
+		jump(libc::SYS_statx as u32, 0, 1),
+		stmt(BPF_RET_K, libc::SECCOMP_RET_TRACE),
+		stmt(BPF_RET_K, libc::SECCOMP_RET_ALLOW),
+	];
+	let prog = libc::sock_fprog {
+		len: filter.len() as u16,
+		filter: filter.as_ptr() as *mut libc::sock_filter,
+	};
+	if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+		return false
+	}
+	let rc = unsafe {
+		libc::prctl(
+			libc::PR_SET_SECCOMP,
+			libc::SECCOMP_MODE_FILTER,
+			&prog as *const _ as libc::c_ulong,
+		)
+	};
+	rc == 0
+}
+
 /// Set as many of `wanted` as this kernel supports, one bit at a time.
 fn install_options(pid: Pid, wanted: &[Options]) -> Options {
 	let mut acc = Options::empty();
@@ -161,17 +235,21 @@ fn install_options(pid: Pid, wanted: &[Options]) -> Options {
 	acc
 }
 
-fn tracer_options() -> Vec<Options> {
-	// No PTRACE_O_EXITKILL: when the traced main process exits we exit too, and
-	// EXITKILL would SIGKILL any still-traced descendants (e.g. a double-forked
-	// daemon). Without it the kernel detaches them and they keep running.
-	vec![
+fn tracer_options(seccomp: bool) -> Vec<Options> {
+	// No PTRACE_O_EXITKILL: when the traced main process exits we either exit
+	// (detaching descendants) or, in seccomp mode, keep waiting for them.
+	// EXITKILL would SIGKILL any still-traced descendant (e.g. a daemon).
+	let mut opts = vec![
 		Options::PTRACE_O_TRACESYSGOOD,
 		Options::PTRACE_O_TRACEFORK,
 		Options::PTRACE_O_TRACEVFORK,
 		Options::PTRACE_O_TRACECLONE,
 		Options::PTRACE_O_TRACEEXEC,
-	]
+	];
+	if seccomp {
+		opts.push(Options::PTRACE_O_TRACESECCOMP);
+	}
+	opts
 }
 
 struct Tracer {
@@ -183,7 +261,14 @@ struct Tracer {
 	/// rsp to restore at syscall-exit for tracees whose translated syscall
 	/// needed scratch space carved below the stack pointer.
 	reserved: HashMap<Pid, u64>,
+	/// true when tracing every syscall (fallback); false in seccomp mode.
 	syscall_mode: bool,
+	/// true when the seccomp filter is installed, so we only stop on the
+	/// translated syscalls.
+	seccomp_mode: bool,
+	/// exit status of the main tracee, remembered so we can keep running for
+	/// seccomp participants (daemons) until every tracee is gone.
+	main_code: Option<i32>,
 }
 
 struct StatxState {
@@ -203,7 +288,16 @@ impl Tracer {
 
 	fn supervise(&mut self) -> ! {
 		if debug() {
-			eprintln!("kernel-compat: syscall translation {}", if self.syscall_mode { "on" } else { "off" });
+			eprintln!(
+				"kernel-compat: mode {}",
+				if self.seccomp_mode {
+					"seccomp (only translated syscalls)"
+				} else if self.syscall_mode {
+					"ptrace (every syscall)"
+				} else {
+					"signals only"
+				}
+			);
 		}
 		self.resume(self.child, None);
 
@@ -214,7 +308,13 @@ impl Tracer {
 						eprintln!("kernel-compat: pid {pid} exited {code}");
 					}
 					if pid == self.child {
-						exit(code)
+						// In seccomp mode the filter outlives us, so keep
+						// running until every tracee is gone.
+						if self.seccomp_mode {
+							self.main_code = Some(code);
+						} else {
+							exit(code)
+						}
 					}
 				},
 				Ok(WaitStatus::Signaled(pid, sig, _)) => {
@@ -222,7 +322,11 @@ impl Tracer {
 						eprintln!("kernel-compat: pid {pid} killed by {sig:?}");
 					}
 					if pid == self.child {
-						exit(128 + sig as i32)
+						if self.seccomp_mode {
+							self.main_code = Some(128 + sig as i32);
+						} else {
+							exit(128 + sig as i32)
+						}
 					}
 				},
 				Ok(WaitStatus::Stopped(pid, sig)) => {
@@ -231,7 +335,7 @@ impl Tracer {
 					}
 					// A newly traced child stops once so we can configure it.
 					if pid != self.child && !self.configured.contains(&pid) {
-						install_options(pid, &tracer_options());
+						install_options(pid, &tracer_options(self.seccomp_mode));
 						self.configured.insert(pid);
 						if sig == Signal::SIGSTOP {
 							self.resume(pid, None);
@@ -244,17 +348,33 @@ impl Tracer {
 						self.resume(pid, Some(sig));
 					}
 				},
+				Ok(WaitStatus::PtraceEvent(pid, _sig, event))
+					if event == libc::PTRACE_EVENT_SECCOMP =>
+				{
+					// A filtered syscall: translate it, then continue. statx
+					// also needs its exit stop to convert the result struct.
+					if self.on_seccomp_stop(pid) {
+						let _ = ptrace::syscall(pid, None);
+					} else {
+						self.resume(pid, None);
+					}
+				},
 				Ok(WaitStatus::PtraceEvent(pid, _sig, _event)) => {
 					// Restart event stops with signal 0 (like strace does), not
 					// with the synthetic SIGTRAP nix reports for them.
 					self.resume(pid, None);
 				},
 				Ok(WaitStatus::PtraceSyscall(pid)) => {
-					self.on_syscall_stop(pid);
+					if self.seccomp_mode {
+						// Only reached for the statx exit we asked for.
+						self.on_syscall_exit(pid);
+					} else {
+						self.on_syscall_stop(pid);
+					}
 					self.resume(pid, None);
 				},
 				Ok(_) => {},
-				Err(Errno::ECHILD) => exit(0),
+				Err(Errno::ECHILD) => exit(self.main_code.unwrap_or(0)),
 				Err(err) => {
 					if debug() {
 						eprintln!("kernel-compat: waitpid error: {err}");
@@ -264,16 +384,42 @@ impl Tracer {
 		}
 	}
 
+	/// Handle a `SECCOMP_RET_TRACE` stop. Returns whether the caller must resume
+	/// with `PTRACE_SYSCALL` to also catch the syscall exit (statx only).
+	fn on_seccomp_stop(&mut self, pid: Pid) -> bool {
+		let regs = match ptrace::getregs(pid) {
+			Ok(regs) => regs,
+			Err(_) => return false,
+		};
+		if regs.orig_rax == libc::SYS_futex as u64 {
+			translate_futex(pid, regs, &mut self.reserved);
+			false
+		} else if regs.orig_rax == libc::SYS_pipe2 as u64 {
+			let mut patched = regs;
+			patched.orig_rax = libc::SYS_pipe as u64;
+			patched.rax = libc::SYS_pipe as u64;
+			let _ = ptrace::setregs(pid, patched);
+			if debug() {
+				eprintln!("kernel-compat: (seccomp) pipe2 -> pipe (flags {:#x} dropped)", regs.rsi);
+			}
+			false
+		} else if regs.orig_rax == libc::SYS_statx as u64 {
+			self.setup_statx(pid, regs);
+			true
+		} else {
+			false
+		}
+	}
+
 	fn on_syscall_stop(&mut self, pid: Pid) {
 		let entering = !*self.in_syscall.get(&pid).unwrap_or(&false);
 		self.in_syscall.insert(pid, entering);
 
-		let mut regs = match ptrace::getregs(pid) {
-			Ok(regs) => regs,
-			Err(_) => return,
-		};
-
 		if entering {
+			let regs = match ptrace::getregs(pid) {
+				Ok(regs) => regs,
+				Err(_) => return,
+			};
 			self.last_syscall.insert(pid, regs.orig_rax);
 			if regs.orig_rax == libc::SYS_futex as u64 {
 				translate_futex(pid, regs, &mut self.reserved);
@@ -293,43 +439,51 @@ impl Tracer {
 				self.setup_statx(pid, regs);
 			}
 		} else {
-			let mut dirty = false;
-			// statx -> newfstatat/fstat: translate the stashed `struct stat`
-			// into `struct statx`, and surface a real error if we can't.
-			if let Some(state) = self.statx.remove(&pid) {
-				if regs.rax == 0 {
-					let ok = read_struct(pid, state.scratch, 144)
-						.map(|stat| build_statx(&stat))
-						.map(|stx| write_struct(pid, state.statxbuf, &stx))
-						.unwrap_or(false);
-					if ok {
-						if debug() {
-							eprintln!("kernel-compat: statx ok");
-						}
-					} else {
-						regs.rax = (-(libc::EFAULT as i64)) as u64;
-						dirty = true;
+			self.on_syscall_exit(pid);
+		}
+	}
+
+	/// Syscall-exit handling shared by both tracing modes: convert the stashed
+	/// statx result and restore any scratch stack reservation.
+	fn on_syscall_exit(&mut self, pid: Pid) {
+		let mut regs = match ptrace::getregs(pid) {
+			Ok(regs) => regs,
+			Err(_) => return,
+		};
+		let mut dirty = false;
+		if let Some(state) = self.statx.remove(&pid) {
+			if regs.rax == 0 {
+				let ok = read_struct(pid, state.scratch, 144)
+					.map(|stat| build_statx(&stat))
+					.map(|stx| write_struct(pid, state.statxbuf, &stx))
+					.unwrap_or(false);
+				if ok {
+					if debug() {
+						eprintln!("kernel-compat: statx ok");
 					}
-				} else if debug() {
-					eprintln!(
-						"kernel-compat: statx -> fallback ret={} (errno {})",
-						regs.rax as i64,
-						-(regs.rax as i64)
-					);
+				} else {
+					regs.rax = (-(libc::EFAULT as i64)) as u64;
+					dirty = true;
 				}
+			} else if debug() {
+				eprintln!(
+					"kernel-compat: statx -> fallback ret={} (errno {})",
+					regs.rax as i64,
+					-(regs.rax as i64)
+				);
 			}
-			// Undo any scratch stack reservation made at syscall entry.
-			if let Some(saved_rsp) = self.reserved.remove(&pid) {
-				regs.rsp = saved_rsp;
-				dirty = true;
-			}
-			if dirty {
-				let _ = ptrace::setregs(pid, regs);
-			}
-			if debug() && regs.rax == (-(libc::ENOSYS as i64)) as u64 {
-				let nr = self.last_syscall.get(&pid).copied().unwrap_or(0);
-				eprintln!("kernel-compat: pid {pid} syscall {nr} -> ENOSYS");
-			}
+		}
+		// Undo any scratch stack reservation made at syscall entry.
+		if let Some(saved_rsp) = self.reserved.remove(&pid) {
+			regs.rsp = saved_rsp;
+			dirty = true;
+		}
+		if dirty {
+			let _ = ptrace::setregs(pid, regs);
+		}
+		if debug() && regs.rax == (-(libc::ENOSYS as i64)) as u64 {
+			let nr = self.last_syscall.get(&pid).copied().unwrap_or(0);
+			eprintln!("kernel-compat: pid {pid} syscall {nr} -> ENOSYS");
 		}
 	}
 
@@ -584,11 +738,14 @@ fn build_statx(stat: &[u8]) -> Vec<u8> {
 	s
 }
 
-fn supervise(child: Pid) -> ! {
+fn supervise(child: Pid, use_seccomp: bool) -> ! {
 	// Consume the child's initial SIGSTOP.
 	let _ = waitpid(child, None);
-	let options = install_options(child, &tracer_options());
-	let syscall_mode = options.contains(Options::PTRACE_O_TRACESYSGOOD);
+	let options = install_options(child, &tracer_options(use_seccomp));
+	// Every-syscall tracing is only the fallback; with seccomp only the
+	// filtered syscalls stop us.
+	let seccomp_mode = use_seccomp && options.contains(Options::PTRACE_O_TRACESECCOMP);
+	let syscall_mode = !seccomp_mode && options.contains(Options::PTRACE_O_TRACESYSGOOD);
 	if debug() {
 		eprintln!("kernel-compat: active options: {options:?}");
 	}
@@ -600,6 +757,8 @@ fn supervise(child: Pid) -> ! {
 		statx: HashMap::new(),
 		reserved: HashMap::new(),
 		syscall_mode,
+		seccomp_mode,
+		main_code: None,
 	};
 	tracer.supervise()
 }
