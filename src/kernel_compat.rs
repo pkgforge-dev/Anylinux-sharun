@@ -11,7 +11,8 @@
 //!    ops to their older equivalents at syscall-entry.
 //!
 //! Enable with `SHARUN_OLD_KERNEL_COMPAT=1`; `0` disables. When unset it decides
-//! automatically: on for kernels < 2.6.30, or when `statx` (4.11) is missing.
+//! automatically: on for kernels older than 4.0, or when `statx` (4.11) is
+//! missing.
 //!
 //! x86_64 only for now; per-architecture register handling would be required
 //! for the others.
@@ -68,20 +69,22 @@ pub fn enabled() -> bool {
 	}
 }
 
-/// Auto mode: run the tracer only when the running kernel actually lacks a
-/// feature we polyfill. Checked with cheap probes, so modern kernels never pay
-/// the ptrace cost.
+/// Auto mode: run the tracer when the kernel is old enough to plausibly need it.
+/// Cheap checks, so modern kernels never pay the ptrace cost.
+///
+/// Triggered outright for kernels older than 4.0, and otherwise by a missing
+/// `statx` (4.11) -- e.g. Qt6 has no fallback when it returns ENOSYS.
+///
+/// The `statx` probe runs here, in the AppRun process, *before* the application
+/// starts: apps may install seccomp filters that reject `statx` (returning
+/// ENOSYS), which would be indistinguishable from an old kernel if probed
+/// later. That is also why the tracer is only ever set up from AppRun and never
+/// from the `bin/*` hardlinks.
 fn needs_compat() -> bool {
-	// XSAVE (XGETBV), futex flags/bitset, pipe2 and AT_RANDOM all predate 2.6.30.
-	if kernel_lt(2, 6, 30) {
+	if kernel_lt(4, 0, 0) {
 		return true
 	}
-	// The newest thing we polyfill that current apps actually rely on is statx
-	// (4.11) -- e.g. Qt6 has no fallback when it returns ENOSYS.
-	if syscall_missing(libc::SYS_statx) {
-		return true
-	}
-	false
+	syscall_missing(libc::SYS_statx)
 }
 
 /// True if `nr` is not implemented by this kernel (returns -ENOSYS).

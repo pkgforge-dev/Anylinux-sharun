@@ -47,7 +47,7 @@ fn print_usage() {
 	SHARUN_OLD_KERNEL_COMPAT=1     Enable compatibility layer that allows
 	                                applications to run on ancient kernels;
 	                                set to 0 to disable, default is automatic
-	                                when statx is missing
+	                                on kernels older than 4.0 or when statx is missing
 	SHARUN_EXTRA_LIBRARY_PATH      Extra library directories with highest priority
 	SHARUN_FALLBACK_LIBRARY_PATH   Fallback library directories with lowest priority
 	SHARUN_MESA_PATH=/path         External mesa install dir (with lib/ and share/)
