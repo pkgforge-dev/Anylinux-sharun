@@ -342,7 +342,15 @@ impl Tracer {
 							continue;
 						}
 					}
-					if sig == Signal::SIGILL && emulate_sigill(pid) {
+					// In seccomp mode a signal delivered while a translated
+					// syscall's exit stop is pending must not be resumed with
+					// PTRACE_CONT: that clears the syscall-trace flag and the
+					// exit stop (which restores rsp) would never fire.
+					let pending = self.seccomp_mode && self.reserved.contains_key(&pid);
+					let suppress = sig == Signal::SIGILL && emulate_sigill(pid);
+					if pending {
+						let _ = ptrace::syscall(pid, if suppress { None } else { Some(sig) });
+					} else if suppress {
 						self.resume(pid, None);
 					} else {
 						self.resume(pid, Some(sig));
@@ -392,8 +400,9 @@ impl Tracer {
 			Err(_) => return false,
 		};
 		if regs.orig_rax == libc::SYS_futex as u64 {
-			translate_futex(pid, regs, &mut self.reserved);
-			false
+			// A timed WAIT_BITSET reserves scratch; if so it needs its exit
+			// stop so on_syscall_exit can restore rsp.
+			translate_futex(pid, regs, &mut self.reserved)
 		} else if regs.orig_rax == libc::SYS_pipe2 as u64 {
 			let mut patched = regs;
 			patched.orig_rax = libc::SYS_pipe as u64;
@@ -531,7 +540,11 @@ impl Tracer {
 	}
 }
 
-fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct, reserved: &mut HashMap<Pid, u64>) {
+/// Rewrite a futex op to a form the kernel understands. Returns true if it
+/// carved scratch below `rsp` (a timed `WAIT_BITSET`/CLOCK_REALTIME wait), in
+/// which case the caller must let the syscall reach its exit stop so `rsp` can
+/// be restored.
+fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct, reserved: &mut HashMap<Pid, u64>) -> bool {
 	// x86_64: futex(uaddr, op, val, timeout, uaddr2, val3) ->
 	// rdi, rsi, rdx, r10, r8, r9
 	let op = regs.rsi as u32;
@@ -548,8 +561,9 @@ fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct, reserved: &mut Ha
 	// Old kernels predate FUTEX_PRIVATE_FLAG / FUTEX_CLOCK_REALTIME and the
 	// bitset ops, so hand the kernel a bare command with no flag bits.
 	if new_cmd == op {
-		return;
+		return false;
 	}
+	let mut did_reserve = false;
 	if new_cmd == FUTEX_WAIT && (cmd == FUTEX_WAIT_BITSET || realtime) {
 		// FUTEX_WAIT_BITSET (and CLOCK_REALTIME waits) use an absolute timeout;
 		// FUTEX_WAIT wants a relative one. Compute it in the tracer and point
@@ -559,6 +573,7 @@ fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct, reserved: &mut Ha
 			regs.rsp = scratch;
 			regs.r10 = scratch;
 			reserved.insert(pid, saved_rsp);
+			did_reserve = true;
 		}
 	}
 	regs.rsi = new_cmd as u64;
@@ -566,11 +581,12 @@ fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct, reserved: &mut Ha
 		if debug() {
 			eprintln!("kernel-compat: futex setregs failed: {err}");
 		}
-		return
+		return did_reserve;
 	}
 	if debug() {
 		eprintln!("kernel-compat: futex op {op:#x} -> {new_cmd:#x}");
 	}
+	did_reserve
 }
 
 /// Read the absolute timespec at `timeout_ptr`, convert it to a relative one,
@@ -739,8 +755,15 @@ fn build_statx(stat: &[u8]) -> Vec<u8> {
 }
 
 fn supervise(child: Pid, use_seccomp: bool) -> ! {
-	// Consume the child's initial SIGSTOP.
-	let _ = waitpid(child, None);
+	// Consume the child's initial SIGSTOP. If it already exited instead (e.g.
+	// TRACEME failed after the preflight, so it ran untraced), propagate that
+	// status rather than losing it.
+	match waitpid(child, None) {
+		Ok(WaitStatus::Stopped(_, _)) => {},
+		Ok(WaitStatus::Exited(_, code)) => exit(code),
+		Ok(WaitStatus::Signaled(_, sig, _)) => exit(128 + sig as i32),
+		_ => {},
+	}
 	let options = install_options(child, &tracer_options(use_seccomp));
 	// Every-syscall tracing is only the fallback; with seccomp only the
 	// filtered syscalls stop us.
