@@ -47,10 +47,6 @@ fn debug() -> bool {
 	matches!(env::var(ENV_DEBUG), Ok(v) if v == "1")
 }
 
-fn trace() -> bool {
-	matches!(env::var("SHARUN_OLD_KERNEL_COMPAT_TRACE"), Ok(v) if v == "1")
-}
-
 /// Probe once whether the kernel implements ppoll(2) (2.6.16+). Only kernels
 /// that lack it get the ppoll -> poll rewrite, so newer kernels are untouched.
 fn ppoll_missing() -> bool {
@@ -450,9 +446,6 @@ impl Tracer {
 				Err(_) => return,
 			};
 			self.last_syscall.insert(pid, regs.orig_rax);
-			if trace() {
-				eprintln!("kernel-compat: enter pid={pid} nr={}", regs.orig_rax);
-			}
 			if regs.orig_rax == libc::SYS_futex as u64 {
 				translate_futex(pid, regs, &mut self.reserved);
 			} else if regs.orig_rax == libc::SYS_pipe2 as u64 {
@@ -509,10 +502,6 @@ impl Tracer {
 			Err(_) => return,
 		};
 		let mut dirty = false;
-		if trace() {
-			let nr = self.last_syscall.get(&pid).copied().unwrap_or(0);
-			eprintln!("kernel-compat: exit  pid={pid} nr={nr} ret={}", regs.rax as i64);
-		}
 		if let Some(state) = self.statx.remove(&pid) {
 			if regs.rax == 0 {
 				let ok = read_struct(pid, state.scratch, 144)
