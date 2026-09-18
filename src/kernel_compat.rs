@@ -47,13 +47,29 @@ fn debug() -> bool {
 	matches!(env::var(ENV_DEBUG), Ok(v) if v == "1")
 }
 
-/// Probe once whether the kernel implements ppoll(2) (2.6.16+). Only kernels
-/// that lack it get the ppoll -> poll rewrite, so newer kernels are untouched.
+/// Probe once whether the kernel implements ppoll(2). A zero timeout is used so
+/// the probe can never block: a working `ppoll(NULL, 0, {0,0}, NULL, 0)` returns
+/// 0 immediately. Ubuntu 6.10's 2.6.17 answers ENOSYS, and some old kernels
+/// answer unimplemented syscalls with the syscall number itself, so both count
+/// as missing. Only then is ppoll rewritten to poll; kernels that have it are
+/// left untouched.
 fn ppoll_missing() -> bool {
 	static MISSING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 	*MISSING.get_or_init(|| {
-		let rc = unsafe { libc::syscall(271i64, 0usize, 0usize, 0usize, 0usize, 0usize) };
-		rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS)
+		let ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+		let rc = unsafe {
+			libc::syscall(
+				libc::SYS_ppoll,
+				std::ptr::null::<libc::pollfd>(),
+				0usize,
+				&ts as *const libc::timespec,
+				std::ptr::null::<libc::sigset_t>(),
+				0usize,
+			)
+		};
+		rc == libc::SYS_ppoll
+			|| (rc == -1
+				&& std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS))
 	})
 }
 
@@ -462,7 +478,7 @@ impl Tracer {
 				}
 			} else if regs.orig_rax == libc::SYS_statx as u64 {
 				self.setup_statx(pid, regs);
-			} else if regs.orig_rax == 271u64 && ppoll_missing() {
+			} else if regs.orig_rax == libc::SYS_ppoll as u64 && ppoll_missing() {
 				// ppoll -> poll, dropping the signal mask. Kernels that lack
 				// ppoll make GLib's main loop spin on the ENOSYS.
 				let ts = regs.rdx;
@@ -533,18 +549,25 @@ impl Tracer {
 		// any HashMap/HashSet) does not cope with what old kernels return here
 		// and panics with "range start index 318 out of range for slice of
 		// length 16", so we synthesize it regardless of the syscall's result.
-		if self.last_syscall.get(&pid).copied() == Some(libc::SYS_getrandom as u64)
-			&& emulate_getrandom(pid, regs.rdi, regs.rsi as usize)
-		{
-			if debug() {
-				eprintln!(
-					"kernel-compat: getrandom emulated ({} bytes at {:#x})",
-					regs.rsi,
-					regs.rdi
-				);
+		let getrandom_nr = libc::SYS_getrandom as u64;
+		if self.last_syscall.get(&pid).copied() == Some(getrandom_nr) {
+			if emulate_getrandom(pid, regs.rdi, regs.rsi as usize) {
+				if debug() {
+					eprintln!(
+						"kernel-compat: getrandom emulated ({} bytes at {:#x})",
+						regs.rsi,
+						regs.rdi
+					);
+				}
+				regs.rax = regs.rsi;
+				dirty = true;
+			} else if regs.rax == getrandom_nr {
+				// Emulation failed and the kernel answered with its own number:
+				// report ENOSYS so callers fall back to /dev/urandom instead of
+				// treating the syscall number as a success.
+				regs.rax = (-(libc::ENOSYS as i64)) as u64;
+				dirty = true;
 			}
-			regs.rax = regs.rsi;
-			dirty = true;
 		}
 		// Syscalls newer than these kernels must fail with ENOSYS so callers
 		// take their fallback path. Some kernels have been observed returning
@@ -809,13 +832,24 @@ fn emulate_getrandom(pid: Pid, buf: u64, count: usize) -> bool {
 		Ok(file) => file,
 		Err(_) => return false,
 	};
-	// Callers only ever ask for small seeding buffers.
-	let count = count.min(1 << 20);
-	let mut bytes = vec![0u8; count];
-	if file.read_exact(&mut bytes).is_err() {
-		return false
+	// Fill the entire requested range in bounded chunks: read_exact can return
+	// short reads and callers may ask for more than one chunk. Only report
+	// success once every byte has been written to the tracee.
+	const CHUNK: usize = 64 * 1024;
+	let mut chunk = vec![0u8; count.min(CHUNK)];
+	let mut off = 0usize;
+	while off < count {
+		let want = (count - off).min(CHUNK);
+		let dst = &mut chunk[..want];
+		if file.read_exact(dst).is_err() {
+			return false
+		}
+		if !write_struct(pid, buf + off as u64, dst) {
+			return false
+		}
+		off += want;
 	}
-	write_struct(pid, buf, &bytes)
+	true
 }
 
 fn rd_u32(b: &[u8], o: usize) -> u32 {
