@@ -569,11 +569,24 @@ fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct, reserved: &mut Ha
 		// FUTEX_WAIT wants a relative one. Compute it in the tracer and point
 		// r10 at scratch memory -- never rewrite the caller's timespec.
 		let saved_rsp = regs.rsp;
-		if let Some(scratch) = reserve_relative_timeout(pid, regs.r10, realtime, saved_rsp) {
-			regs.rsp = scratch;
-			regs.r10 = scratch;
-			reserved.insert(pid, saved_rsp);
-			did_reserve = true;
+		match reserve_relative_timeout(pid, regs.r10, realtime, saved_rsp) {
+			// No timeout at all: nothing to convert, proceed with the rewrite.
+			Ok(None) => {},
+			Ok(Some(scratch)) => {
+				regs.rsp = scratch;
+				regs.r10 = scratch;
+				reserved.insert(pid, saved_rsp);
+				did_reserve = true;
+			},
+			// Could not convert: leave WAIT_BITSET in place so the kernel
+			// returns ENOSYS, rather than handing it the absolute deadline as
+			// a relative wait that would effectively never expire.
+			Err(()) => {
+				if debug() {
+					eprintln!("kernel-compat: futex timeout conversion failed, op left as-is");
+				}
+				return false;
+			},
 		}
 	}
 	regs.rsi = new_cmd as u64;
@@ -591,13 +604,16 @@ fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct, reserved: &mut Ha
 
 /// Read the absolute timespec at `timeout_ptr`, convert it to a relative one,
 /// write it to scratch space below `saved_rsp`, and return the scratch address.
-fn reserve_relative_timeout(pid: Pid, timeout_ptr: u64, realtime: bool, saved_rsp: u64) -> Option<u64> {
+/// `Ok(None)` when there is no timeout to convert, `Ok(Some(scratch))` when it
+/// converted and reserved scratch below `saved_rsp`, `Err(())` when it could
+/// not (read/clock/poke failure).
+fn reserve_relative_timeout(pid: Pid, timeout_ptr: u64, realtime: bool, saved_rsp: u64) -> Result<Option<u64>, ()> {
 	if timeout_ptr == 0 {
-		return None
+		return Ok(None)
 	}
-	let raw = read_struct(pid, timeout_ptr, 16)?;
-	let abs_sec = i64::from_le_bytes(raw[0..8].try_into().ok()?);
-	let abs_nsec = i64::from_le_bytes(raw[8..16].try_into().ok()?);
+	let raw = read_struct(pid, timeout_ptr, 16).ok_or(())?;
+	let abs_sec = i64::from_le_bytes(raw[0..8].try_into().map_err(|_| ())?);
+	let abs_nsec = i64::from_le_bytes(raw[8..16].try_into().map_err(|_| ())?);
 	let clock = if realtime {
 		libc::CLOCK_REALTIME
 	} else {
@@ -605,7 +621,7 @@ fn reserve_relative_timeout(pid: Pid, timeout_ptr: u64, realtime: bool, saved_rs
 	};
 	let mut now: libc::timespec = unsafe { std::mem::zeroed() };
 	if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
-		return None
+		return Err(())
 	}
 	let mut sec = abs_sec - now.tv_sec;
 	let mut nsec = abs_nsec - now.tv_nsec;
@@ -622,14 +638,14 @@ fn reserve_relative_timeout(pid: Pid, timeout_ptr: u64, realtime: bool, saved_rs
 	buf[0..8].copy_from_slice(&sec.to_le_bytes());
 	buf[8..16].copy_from_slice(&nsec.to_le_bytes());
 	if !write_struct(pid, scratch, &buf) {
-		return None
+		return Err(())
 	}
 	if debug() {
 		eprintln!(
 			"kernel-compat: futex timeout {abs_sec}.{abs_nsec} -> {sec}.{nsec} rel (scratch {scratch:#x})"
 		);
 	}
-	Some(scratch)
+	Ok(Some(scratch))
 }
 
 fn peek_word(pid: Pid, addr: u64) -> Option<u64> {
