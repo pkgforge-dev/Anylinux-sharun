@@ -101,9 +101,13 @@ fn pipe2_missing() -> bool {
 fn getrandom_missing() -> bool {
 	static MISSING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 	*MISSING.get_or_init(|| {
+		// GRND_NONBLOCK (since 3.17) so a kernel that has getrandom is not
+		// mistaken for one that lacks it just because the CRNG is not ready
+		// yet; EAGAIN then simply means "present".
+		const GRND_NONBLOCK: libc::c_long = 0x0001;
 		let mut buf = [0u8; 16];
 		let rc = unsafe {
-			libc::syscall(libc::SYS_getrandom, buf.as_mut_ptr(), buf.len(), 0)
+			libc::syscall(libc::SYS_getrandom, buf.as_mut_ptr(), buf.len(), GRND_NONBLOCK)
 		};
 		not_implemented(libc::SYS_getrandom, rc)
 	})
@@ -665,6 +669,10 @@ impl Tracer {
 			let nr = self.last_syscall.get(&pid).copied().unwrap_or(0);
 			eprintln!("kernel-compat: pid {pid} syscall {nr} -> ENOSYS");
 		}
+		// The entry was consumed. Without this, a later exit stop that reuses
+		// the slot (e.g. a statx exit after a getrandom exit) could re-enter
+		// the getrandom branch with the wrong registers.
+		self.last_syscall.remove(&pid);
 	}
 
 	/// statx (4.11) -> newfstatat (ancient), translating `struct stat` to
