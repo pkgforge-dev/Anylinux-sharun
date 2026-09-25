@@ -30,6 +30,10 @@
 //!   sockets -- hence the two different shapes). The tracer arms an
 //!   `ITIMER_REAL` for the nearest deadline, these kernels having no `timerfd`
 //!   for the tracer either, and writes the expiration count when it lands.
+//!   Unlike the eventfd shape, this one needs `/proc` mounted for the tracee:
+//!   without it the write end cannot be reopened and the emulation fails, so a
+//!   container that hides `/proc` keeps any application that creates a timerfd
+//!   from starting.
 //!
 //! Everything runs through the tracee's own syscalls. At the entry stop of the
 //! emulated call we rewrite it into the first call of the sequence; the calls
