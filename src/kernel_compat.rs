@@ -974,7 +974,6 @@ impl Tracer {
 				Ok(regs) => regs,
 				Err(_) => return,
 			};
-			self.last_syscall.insert(pid, regs.orig_rax);
 			if debug() {
 				log_entry(pid, &regs);
 			}
@@ -989,6 +988,7 @@ impl Tracer {
 			if regs.cs != 0x33 {
 				return
 			}
+			self.last_syscall.insert(pid, regs.orig_rax);
 			if regs.orig_rax == libc::SYS_futex as u64 {
 				translate_futex(pid, regs, &mut self.reserved);
 			} else if regs.orig_rax == libc::SYS_pipe2 as u64 && pipe2_missing() {
