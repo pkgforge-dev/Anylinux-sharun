@@ -374,7 +374,41 @@ fn needs_compat() -> bool {
 
 /// Run `apprun::run_as_apprun` for `(sharun_dir, bin_dir, exec_args)` under the
 /// tracer. Never returns.
+/// Whether the application this AppDir runs by default is a 32-bit ELF. An
+/// `AppRun.sh` decides for itself what to run, so there is nothing to inspect
+/// and the answer is no; the per-tracee checks below still keep the layer off
+/// a 32-bit process in that case.
+fn runs_elf32(sharun_dir: &str, bin_dir: &str) -> bool {
+	let sharun_dir = std::path::Path::new(sharun_dir);
+	if sharun_dir.join("AppRun.sh").exists() {
+		return false
+	}
+	let Some(app) = crate::apprun::default_binary(&sharun_dir.to_string_lossy(), bin_dir) else {
+		return false
+	};
+	let app = std::path::PathBuf::from(app);
+	// `bin/<name>` is normally a hardlink to sharun itself, which re-enters
+	// sharun as that name and runs the real binary from `shared/bin`; the ELF to
+	// inspect is then that one, not the wrapper.
+	let app = match (app.file_name(), env::current_exe()) {
+		(Some(name), Ok(me)) if crate::utils::is_hardlink(&me, &app) => {
+			sharun_dir.join("shared/bin").join(name)
+		},
+		_ => app,
+	};
+	crate::utils::is_elf32(&app.to_string_lossy().to_string()).unwrap_or(false)
+}
+
 pub fn run_apprun_traced(sharun_dir: &str, bin_dir: &str, exec_args: &[String]) -> ! {
+	// Everything below speaks x86_64: syscall numbers, the ptrace register
+	// layout and the ioctl request encodings all mean something else under
+	// i386, so a 32-bit application would be translated into calls it never
+	// made. 32-bit tracees are not supported by this layer at all; run them
+	// untraced, exactly as if it were disabled.
+	if runs_elf32(sharun_dir, bin_dir) {
+		eprintln!("[sharun] old kernel compatibility does not support 32-bit applications");
+		crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args);
+	}
 	// If ptrace is blocked (e.g. a container's seccomp policy), don't turn a
 	// runnable app into a failure: run it untraced, exactly as if this layer
 	// were disabled. On a genuinely ancient kernel glibc dies on its own, which
@@ -909,7 +943,10 @@ impl Tracer {
 									continue;
 								}
 							}
-						} else if !self.emulated.begin(pid) {
+						} else if !self.emulated.begin(
+							pid,
+							!*self.in_syscall.get(&pid).unwrap_or(&false),
+						) {
 							self.on_syscall_stop(pid);
 						}
 						self.resume(pid, None);
@@ -970,6 +1007,14 @@ impl Tracer {
 			self.last_syscall.insert(pid, regs.orig_rax);
 			if debug() {
 				log_entry(pid, &regs);
+			}
+			// This layer is x86_64 only: the numbers, the argument registers and
+			// the ioctl requests below all mean something else to an i386
+			// tracee, so a 32-bit process (a child of the application, say) is
+			// never translated. It is only traced, and its signals passed
+			// through.
+			if regs.cs != 0x33 {
+				return
 			}
 			if regs.orig_rax == libc::SYS_futex as u64 {
 				translate_futex(pid, regs, &mut self.reserved);
@@ -1093,6 +1138,11 @@ impl Tracer {
 				return
 			},
 		};
+		// Same rule as on the way in: nothing here applies to a 32-bit tracee,
+		// whose numbers match these constants only by accident.
+		if regs.cs != 0x33 {
+			return
+		}
 		if debug_all() {
 			eprintln!(
 				"kernel-compat: [t{pid}] syscall {} -> {}",
@@ -1158,49 +1208,33 @@ impl Tracer {
 				dirty = true;
 			}
 		}
-		// Syscalls newer than these kernels must fail with ENOSYS so callers
-		// take their fallback path. Some kernels have been observed returning
-		// the syscall number itself (e.g. clone3 -> 435), which makes glibc
-		// think it succeeded; normalize to ENOSYS.
+		// Syscalls newer than these kernels must fail with ENOSYS so callers take
+		// their fallback path. A pre-2.6.19 x86_64 kernel does not answer an
+		// unknown number with -ENOSYS but with the number itself (clone3 -> 435),
+		// which makes glibc think it succeeded; normalize that back to ENOSYS.
+		//
+		// This must test the *number*, not a list of numbers: the kernels that
+		// echo at all echo for every entry they do not have (which is what burnt
+		// us on `copy_file_range`, 326), and 2.6.17 tops out at 278 while 2.6.18
+		// tops out at 279, so anything above that is a syscall they simply do not
+		// have to begin with. Testing a list instead would turn a legitimate
+		// result that happens to equal the call's number -- `epoll_create1` 291
+		// returning fd 291, `openat2` 437 returning fd 437 -- into ENOSYS on
+		// every kernel that implements those calls.
 		if let Some(nr) = self.last_syscall.get(&pid).copied() {
-			const FORCE_ENOSYS: [u64; 14] = [
-				282, // signalfd (2.6.22)
-				283, // timerfd_create (2.6.25)
-				284, // eventfd (2.6.22)
-				288, // accept4 (2.6.28)
-				289, // signalfd4 (2.6.27)
-				290, // eventfd2 (2.6.27)
-				291, // epoll_create1 (2.6.27)
-				292, // dup3 (2.6.27)
-				294, // inotify_init1 (2.6.27)
-				302, // prlimit64 (2.6.36)
-				334, // rseq (4.18)
-				435, // clone3 (5.3)
-				437, // openat2 (5.6)
-				439, // faccessat2 (5.8)
-			];
-			// The list above is what has actually been observed, but a kernel
-			// that echoes at all echoes for *every* number it does not have,
-			// which is what burnt us on `copy_file_range` (326). Match those
-			// kernels generically. 2.6.17 tops out at 278 and 2.6.18 at 279, so
-			// anything above that is a syscall they simply do not have (and no
-			// real syscall can be the one being called). 64-bit tracees only:
-			// the i386 entry path returns a real -ENOSYS, and numbers this high
-			// are ordinary syscalls there.
 			const ABOVE_TABLE: u64 = 279;
-			let echoed = regs.cs == 0x33
-				&& nr > ABOVE_TABLE
-				&& kernel_echoes_number();
 			// Only an *untranslated* call can be echoing: a number the kernel
 			// really does not have is passed through untouched, whereas a
-			// rewritten one executes a different syscall whose result is its
-			// own. Without this test a translated call that legitimately returns
-			// a value equal to the number it was called as -- `epoll_create`
-			// handing back fd 291 for the rewritten `epoll_create1`, or an
-			// emulated getrandom filling a 318-byte buffer -- would be reported
-			// as ENOSYS and the fd leaked.
-			let translated = regs.orig_rax != nr;
-			if !translated && (FORCE_ENOSYS.contains(&nr) || echoed) && regs.rax == nr {
+			// rewritten one executes a different syscall whose result is its own
+			// (`epoll_create` handing back fd 291 for the rewritten
+			// `epoll_create1`, or an emulated getrandom filling a 318-byte
+			// buffer). 64-bit tracees only: the i386 entry path returns a real
+			// -ENOSYS, and numbers this high are ordinary syscalls there.
+			let echoed = regs.cs == 0x33
+				&& nr > ABOVE_TABLE
+				&& kernel_echoes_number()
+				&& regs.orig_rax == nr;
+			if echoed && regs.rax == nr {
 				if debug() {
 					eprintln!(
 						"kernel-compat: syscall {nr} returned its own number; forcing ENOSYS"

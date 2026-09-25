@@ -9,9 +9,18 @@
 //! * `eventfd`/`eventfd2` (2.6.22/2.6.27). Bun's loop treats a failure as fatal
 //!   ("eventfd() failed during loop init"), so `ENOSYS` is not enough. An
 //!   `AF_UNIX` datagram socket *connected to its own abstract address* is a
-//!   single fd with the same shape: a write makes it readable, writes queue up
-//!   (eventfd's counter), `poll`/`epoll` report `EPOLLIN`, and reading an empty
-//!   non-blocking fd gives `EAGAIN`.
+//!   single fd with much of the same shape: a write makes it readable,
+//!   `poll`/`epoll` report `EPOLLIN`, reading an empty non-blocking fd gives
+//!   `EAGAIN`, and closing either end wakes the other.
+//!
+//!   It is not a counter, though, and that is the one place the substitution is
+//!   visible: two `write(fd, &1, 8)` followed by a `read` return `1` and leave
+//!   the second datagram queued, where a real eventfd returns `2` and drains.
+//!   `POLLOUT` is always ready rather than ready below `UINT64_MAX - 1`, and a
+//!   blocking write blocks when the socket buffer fills (about 200 KB) instead
+//!   of at the counter's limit. An application that only uses an eventfd as a
+//!   wakeup -- write one end, wait for the other, drain it -- cannot tell the
+//!   difference, which is what this is for.
 //! * `timerfd_create`/`settime`/`gettime` (2.6.25). uSockets' epoll backend
 //!   returns NULL when the create fails, which Bun turns into a panic. Here the
 //!   read that has to become readable on a deadline belongs to the application
@@ -109,8 +118,9 @@ enum Step {
 	Nonblock { fd: Which },
 	WriteInitial { fd: Which, buffer: u64 },
 	Close { fd: Which },
-	/// fcntl(fd, F_DUPFD): the tracee's own fd, so the value is a literal.
-	FcntlDupfd { fd: u64 },
+	/// fcntl(fd, F_DUPFD, minimum): the tracee's own fd, so the value is a
+	/// literal, plus the lowest fd the caller will accept.
+	FcntlDupfd { fd: u64, minimum: u64 },
 	/// fcntl(fd, F_SETFD, FD_CLOEXEC) on the fd an earlier call returned.
 	FcntlCloexec { fd: Which },
 	/// lseek(fd, offset, SEEK_SET): the offset half of a pwritev/preadv.
@@ -206,9 +216,23 @@ impl Emulations {
 	}
 
 	/// Take over the entry stop if this is a syscall we emulate and the kernel
-	/// lacks it. `true` means the caller must skip its own entry handling.
-	pub fn begin(&mut self, pid: Pid) -> bool {
+	/// lacks it. `entering` is the caller's record of which way round this stop
+	/// is; `true` means the caller must skip its own entry handling.
+	pub fn begin(&mut self, pid: Pid, entering: bool) -> bool {
+		// Only an entry stop has a call to take over: the exit stop of a call
+		// that already ran must not be rewritten, or the application would lose
+		// the result and the call would be executed a second time.
+		if !entering {
+			return false
+		}
 		let Ok(regs) = ptrace::getregs(pid) else { return false };
+		// x86_64 only. An i386 tracee uses the same numbers for unrelated
+		// syscalls (`waitid` 284 is `eventfd`, `kexec_load` 283 is
+		// `timerfd_create`, ...) and keeps its arguments in different registers,
+		// so matching here would hand it an emulated object it never asked for.
+		if regs.cs != 0x33 {
+			return false
+		}
 		match regs.orig_rax {
 			nr if nr == libc::SYS_close as u64 => {
 				// Stop tracking an emulated fd the application is done with.
@@ -304,7 +328,7 @@ impl Emulations {
 		}
 		let Some(gadget) = gadget_for(pid, regs) else { return false };
 		let queue = VecDeque::from([
-			Step::FcntlDupfd { fd: regs.rdi },
+			Step::FcntlDupfd { fd: regs.rdi, minimum: regs.rdx },
 			Step::FcntlCloexec { fd: Which::Result },
 		]);
 		if debug() {
@@ -636,14 +660,30 @@ impl Emulations {
 
 		// Done: hand the application the emulated result, or the error.
 		if let Active::Sequence { saved, results, outcome, fd, .. } = &active {
-			let mut done = *saved;
-			done.rax = match failure {
-				Some(err) => err as u64,
-				None => match outcome {
-					Outcome::Call(i) => results.get(*i).copied().unwrap_or(-libc::EINVAL as i64) as u64,
-					Outcome::Adopted => *fd as u64,
-				},
+			let value = match outcome {
+				Outcome::Call(i) => results.get(*i).copied().unwrap_or(-libc::EINVAL as i64),
+				Outcome::Adopted => *fd,
 			};
+			// The answer is what the call the emulation is *for* returned. A
+			// trailing step failing -- a signal-mask restore, an FD_CLOEXEC that
+			// could not be set -- is a loss, but not a reason to replace that
+			// answer with the cleanup's error and, in the dup case, throw away
+			// the fd it produced. Only when the outcome itself did not happen is
+			// the first error the honest answer.
+			let outcome_happened = value >= 0;
+			let result = if outcome_happened { value } else { failure.unwrap_or(value) };
+			if debug() {
+				if let Some(err) = failure {
+					if outcome_happened && err != result {
+						eprintln!(
+							"kernel-compat: emulation done with result {result}, a later step failed with {}",
+							-err
+						);
+					}
+				}
+			}
+			let mut done = *saved;
+			done.rax = result as u64;
 			let _ = ptrace::setregs(pid, done);
 		}
 	}
@@ -655,28 +695,29 @@ impl Emulations {
 			return;
 		}
 		let mut due = Vec::new();
-		for (fd, timer) in self.timers.iter_mut() {
+		for (fd, timer) in self.timers.iter() {
 			let Some(deadline) = timer.deadline else { continue };
 			let Some(now) = clock_now(timer.clockid) else { continue };
 			if now < deadline {
 				continue;
 			}
 			// An interval timer may have missed several periods while the tracer
-			// was busy; report them together, the way the real counter does.
+			// was busy; report them together, the way the real counter does. The
+			// new deadline is worked out here but only applied once the
+			// expiration has actually been handed over, below.
 			let mut count = 1u64;
+			let mut next = None;
 			if timer.interval != (0, 0) {
 				let mut following = add(deadline, timer.interval);
 				while now >= following && count < u32::MAX as u64 {
 					following = add(following, timer.interval);
 					count += 1;
 				}
-				timer.deadline = Some(following);
-			} else {
-				timer.deadline = None;
+				next = Some(following);
 			}
-			due.push((*fd, count));
+			due.push((*fd, count, next));
 		}
-		for (fd, count) in due {
+		for (fd, count, next) in due {
 			let Some(handle) = self.write_ends.get(&fd) else {
 				self.timers.remove(&fd);
 				continue;
@@ -688,20 +729,33 @@ impl Emulations {
 			let written = unsafe {
 				libc::write(handle.as_raw_fd(), buffer.as_ptr() as *const libc::c_void, 8)
 			};
-			if written < 0 {
-				match Errno::last() {
-					// The reader is alive but has not drained the pipe yet, or
-					// the tracer's own SIGALRM interrupted the write. The timer
-					// is still theirs to read, so keep it: dropping it here
-					// would silently switch off a repeating timerfd the first
-					// time the application stalls.
-					Errno::EAGAIN | Errno::EINTR => {},
-					// The read end is gone: the application closed its timerfd.
-					_ => {
-						self.write_ends.remove(&fd);
-						self.timers.remove(&fd);
-					},
+			if written == 8 {
+				// The expiration is on its way to the application, so the timer
+				// can move on: to the next period, or to nothing at all for a
+				// one-shot. Advancing it before the write is what lost a
+				// one-shot's only expiration when the write came back EINTR.
+				if let Some(timer) = self.timers.get_mut(&fd) {
+					timer.deadline = next;
 				}
+				continue
+			}
+			match Errno::last() {
+				// The reader is alive, so the timer stays theirs to read. An
+				// interval timer moves to its next period rather than keeping an
+				// overdue deadline, which would have the tracer retrying on a
+				// microsecond loop for as long as the pipe stays full; a one-shot
+				// keeps its deadline, since only EINTR can fail its single write
+				// and that retry succeeds straight away.
+				Errno::EAGAIN | Errno::EINTR => {
+					if let (Some(timer), Some(next)) = (self.timers.get_mut(&fd), next) {
+						timer.deadline = Some(next);
+					}
+				},
+				// The read end is gone: the application closed its timerfd.
+				_ => {
+					self.write_ends.remove(&fd);
+					self.timers.remove(&fd);
+				},
 			}
 		}
 		self.arm();
@@ -762,9 +816,9 @@ fn build(step: &Step, active: &Active) -> (u64, [u64; 6]) {
 			(libc::SYS_write as u64, [fd_of(which), buffer, 8, 0, 0, 0])
 		},
 		Step::Close { fd: which } => (libc::SYS_close as u64, [fd_of(which), 0, 0, 0, 0, 0]),
-		Step::FcntlDupfd { fd } => (
+		Step::FcntlDupfd { fd, minimum } => (
 			libc::SYS_fcntl as u64,
-			[fd, libc::F_DUPFD as u64, 0, 0, 0, 0],
+			[fd, libc::F_DUPFD as u64, minimum, 0, 0, 0],
 		),
 		Step::FcntlCloexec { fd: which } => (
 			libc::SYS_fcntl as u64,
