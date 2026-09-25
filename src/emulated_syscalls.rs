@@ -241,6 +241,7 @@ impl Emulations {
 			nr if nr == libc::SYS_timerfd_gettime as u64 => self.timerfd_gettime(pid, regs),
 			nr if nr == libc::SYS_fcntl as u64 => self.dupfd_cloexec(pid, regs),
 			nr if nr == libc::SYS_pwritev as u64 => self.vector_io(pid, regs, true),
+			nr if nr == libc::SYS_preadv as u64 => self.vector_io(pid, regs, false),
 			nr if nr == libc::SYS_epoll_pwait as u64 => self.epoll_pwait(pid, regs),
 			_ => false,
 		}
@@ -275,10 +276,13 @@ impl Emulations {
 	}
 
 	/// pwritev(fd, iov, iovcnt, offset) (2.6.30) -> lseek + writev; preadv is the
-	/// same split with readv. Both halves are ancient, so the pair is equivalent
-	/// except that the file offset moves, which a caller that does its own
-	/// position tracking never notices. Bun writes buffered output through the
-	/// offset form: without it the bytes stay in the buffer forever, so the
+	/// same split with readv. The data goes to the same place, but the pair is
+	/// not what the caller asked for in three ways: the file offset moves, the
+	/// lseek and the transfer are not atomic against another writer, and on an
+	/// `O_APPEND` file the write lands at the end rather than at the offset. A
+	/// caller that does its own position tracking -- which is what this exists
+	/// for, Bun writing its buffered output through the offset form -- notices
+	/// none of that: without it the bytes stay in the buffer forever, so the
 	/// application runs, prints nothing and no terminal UI ever appears.
 	fn vector_io(&mut self, pid: Pid, regs: libc::user_regs_struct, write: bool) -> bool {
 		if !kernel_lt(2, 6, 30) {

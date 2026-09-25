@@ -482,7 +482,7 @@ fn install_seccomp_filter() -> bool {
 	// predate the bitset ops). On anything newer the rewrites are wrong or
 	// pointless, and stopping on them just costs a signal per call.
 	let mut wanted: Vec<u32> = Vec::new();
-	if kernel_lt(2, 6, 25) {
+	if kernel_lt(2, 6, 29) {
 		wanted.push(libc::SYS_futex as u32);
 	}
 	if pipe2_missing() {
@@ -676,7 +676,11 @@ struct Tracer {
 	reserved: HashMap<Pid, u64>,
 	/// A signal that arrived while the tracee was inside an emulation, held back
 	/// until the sequence finishes. See the `Wait::Stopped` arm: the tracee must
-	/// not enter a signal handler between the emulation's injected calls.
+	/// not enter a signal handler between the emulation's injected calls. One
+	/// slot per pid, so a second signal arriving during the same sequence
+	/// replaces the first rather than queueing behind it; a sequence lasts a
+	/// handful of syscalls, and the alternative is a queue that has no reliable
+	/// stop left to drain on.
 	stashed_signal: HashMap<Pid, i32>,
 	/// Pids resumed from a seccomp stop with PTRACE_SYSCALL for which the
 	/// spurious syscall-entry stop has not been consumed yet. The entry stop
@@ -1099,6 +1103,8 @@ impl Tracer {
 				// pending state rather than let a later stop collect it.
 				self.termios2_get.remove(&pid);
 				self.statx.remove(&pid);
+				self.last_syscall.remove(&pid);
+				self.reserved.remove(&pid);
 				return
 			},
 		};
@@ -1148,6 +1154,7 @@ impl Tracer {
 		// and panics with "range start index 318 out of range for slice of
 		// length 16", so we synthesize it regardless of the syscall's result.
 		let getrandom_nr = libc::SYS_getrandom as u64;
+		let mut synthesized = false;
 		if self.last_syscall.get(&pid).copied() == Some(getrandom_nr) && getrandom_missing() {
 			if emulate_getrandom(pid, regs.rdi, regs.rsi as usize) {
 				if debug() {
@@ -1158,6 +1165,7 @@ impl Tracer {
 					);
 				}
 				regs.rax = regs.rsi;
+				synthesized = true;
 				dirty = true;
 			} else if regs.rax == getrandom_nr {
 				// Emulation failed and the kernel answered with its own number:
@@ -1193,7 +1201,10 @@ impl Tracer {
 				&& nr > ABOVE_TABLE
 				&& kernel_echoes_number()
 				&& regs.orig_rax == nr;
-			if echoed && regs.rax == nr {
+			// `synthesized` is the count this layer just wrote into rax: a request
+			// for exactly 318 bytes would otherwise match its own syscall number
+			// and be turned back into ENOSYS.
+			if !synthesized && echoed && regs.rax == nr {
 				if debug() {
 					eprintln!(
 						"kernel-compat: syscall {nr} returned its own number; forcing ENOSYS"
