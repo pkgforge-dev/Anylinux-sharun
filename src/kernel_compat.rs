@@ -980,14 +980,6 @@ impl Tracer {
 			if debug() {
 				log_entry(pid, &regs);
 			}
-			// This layer is x86_64 only: the numbers, the argument registers and
-			// the ioctl requests below all mean something else to an i386
-			// tracee, so a 32-bit process (a child of the application, say) is
-			// never translated. It is only traced, and its signals passed
-			// through.
-			if regs.cs != 0x33 {
-				return
-			}
 			if regs.orig_rax == libc::SYS_futex as u64 {
 				translate_futex(pid, regs, &mut self.reserved);
 			} else if regs.orig_rax == libc::SYS_pipe2 as u64 && pipe2_missing() {
@@ -1110,11 +1102,6 @@ impl Tracer {
 				return
 			},
 		};
-		// Same rule as on the way in: nothing here applies to a 32-bit tracee,
-		// whose numbers match these constants only by accident.
-		if regs.cs != 0x33 {
-			return
-		}
 		if debug_all() {
 			eprintln!(
 				"kernel-compat: [t{pid}] syscall {} -> {}",
@@ -1281,12 +1268,7 @@ impl Tracer {
 	/// What it cannot carry are the two speed fields the caller put after those
 	/// 36 bytes: an older kernel has no way to express a rate that is not a
 	/// `Bxxxx` code, so `c_cflag` decides the line speed there. Calls that are
-	/// not 64-bit are left alone: the request would be in a different register,
-	/// and a misread one could only do damage.
 	fn setup_termios2(&mut self, pid: Pid, mut regs: libc::user_regs_struct) {
-		if regs.cs != 0x33 {
-			return
-		}
 		let request = regs.rsi;
 		let Some(legacy) = legacy_termios_request(request) else { return };
 		let arg = regs.rdx;
