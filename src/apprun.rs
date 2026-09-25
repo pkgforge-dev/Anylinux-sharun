@@ -77,25 +77,6 @@ pub fn run_as_apprun(
 		eprintln!("Failed to run AppRun.sh: {err}");
 		exit(1);
 	}
-	let app = match default_binary(sharun_dir, bin_dir) {
-		Some(app) => app,
-		None => {
-			eprintln!("Failed to get app name from .desktop file");
-			exit(1)
-		},
-	};
-
-	let err = Command::new(&app)
-		.args(exec_args)
-		.exec();
-	eprintln!("Failed to run App: {app}: {err}");
-	exit(1)
-}
-
-/// The binary this AppDir runs by default, as `bin_dir/<name>` with `<name>`
-/// taken from the `Exec=` line of its desktop entry. `None` when there is no
-/// desktop entry to read, or no `Exec=` in it.
-pub fn default_binary(sharun_dir: &str, bin_dir: &str) -> Option<String> {
 	let mut appname: String = "".into();
 	if let Ok(dir) = Path::new(sharun_dir).read_dir() {
 		for entry in dir.flatten() {
@@ -117,13 +98,19 @@ pub fn default_binary(sharun_dir: &str, bin_dir: &str) -> Option<String> {
 			}
 		}
 	}
-	let name = appname.trim().split("\n").next()?;
-	if name.is_empty() {
-		return None
+
+	if let Some(name) = appname.trim().split("\n").next() {
+		appname = basename(name)
+		.replace("'", "").replace("\"", "")
+	} else {
+		eprintln!("Failed to get app name from .desktop file");
+		exit(1)
 	}
-	let name = basename(name).replace("'", "").replace("\"", "");
-	if name.is_empty() {
-		return None
-	}
-	Some(format!("{bin_dir}/{name}"))
+	let app = &format!("{bin_dir}/{appname}");
+
+	let err = Command::new(app)
+		.args(exec_args)
+		.exec();
+	eprintln!("Failed to run App: {app}: {err}");
+	exit(1)
 }

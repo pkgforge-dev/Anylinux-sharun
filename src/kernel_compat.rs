@@ -346,7 +346,13 @@ fn kernel_echoes_number() -> bool {
 }
 
 /// Whether the compatibility tracer should run for this launch.
-pub fn enabled() -> bool {
+pub fn enabled(sharun_dir: &str) -> bool {
+	// An AppDir that ships 32-bit libraries can run 32-bit binaries, and this
+	// layer is x86_64 only from top to bottom, so it stays out of the way
+	// entirely. Nothing to inspect: the directory being there is the answer.
+	if std::path::Path::new(sharun_dir).join("lib32").is_dir() {
+		return false
+	}
 	match env::var(ENV_ENABLE) {
 		Ok(v) if v == "0" => false,
 		Ok(_) => true,
@@ -374,41 +380,7 @@ fn needs_compat() -> bool {
 
 /// Run `apprun::run_as_apprun` for `(sharun_dir, bin_dir, exec_args)` under the
 /// tracer. Never returns.
-/// Whether the application this AppDir runs by default is a 32-bit ELF. An
-/// `AppRun.sh` decides for itself what to run, so there is nothing to inspect
-/// and the answer is no; the per-tracee checks below still keep the layer off
-/// a 32-bit process in that case.
-fn runs_elf32(sharun_dir: &str, bin_dir: &str) -> bool {
-	let sharun_dir = std::path::Path::new(sharun_dir);
-	if sharun_dir.join("AppRun.sh").exists() {
-		return false
-	}
-	let Some(app) = crate::apprun::default_binary(&sharun_dir.to_string_lossy(), bin_dir) else {
-		return false
-	};
-	let app = std::path::PathBuf::from(app);
-	// `bin/<name>` is normally a hardlink to sharun itself, which re-enters
-	// sharun as that name and runs the real binary from `shared/bin`; the ELF to
-	// inspect is then that one, not the wrapper.
-	let app = match (app.file_name(), env::current_exe()) {
-		(Some(name), Ok(me)) if crate::utils::is_hardlink(&me, &app) => {
-			sharun_dir.join("shared/bin").join(name)
-		},
-		_ => app,
-	};
-	crate::utils::is_elf32(&app.to_string_lossy().to_string()).unwrap_or(false)
-}
-
 pub fn run_apprun_traced(sharun_dir: &str, bin_dir: &str, exec_args: &[String]) -> ! {
-	// Everything below speaks x86_64: syscall numbers, the ptrace register
-	// layout and the ioctl request encodings all mean something else under
-	// i386, so a 32-bit application would be translated into calls it never
-	// made. 32-bit tracees are not supported by this layer at all; run them
-	// untraced, exactly as if it were disabled.
-	if runs_elf32(sharun_dir, bin_dir) {
-		eprintln!("[sharun] old kernel compatibility does not support 32-bit applications");
-		crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args);
-	}
 	// If ptrace is blocked (e.g. a container's seccomp policy), don't turn a
 	// runnable app into a failure: run it untraced, exactly as if this layer
 	// were disabled. On a genuinely ancient kernel glibc dies on its own, which
