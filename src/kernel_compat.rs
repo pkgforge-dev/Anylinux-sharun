@@ -347,17 +347,23 @@ fn kernel_echoes_number() -> bool {
 
 /// Whether the compatibility tracer should run for this launch.
 pub fn enabled(sharun_dir: &str) -> bool {
-	// An AppDir that ships 32-bit libraries can run 32-bit binaries, and this
-	// layer is x86_64 only from top to bottom, so it stays out of the way
-	// entirely. Nothing to inspect: the directory being there is the answer.
-	if std::path::Path::new(sharun_dir).join("lib32").is_dir() {
-		return false
-	}
 	match env::var(ENV_ENABLE) {
 		Ok(v) if v == "0" => false,
+		// An explicit request wins over the lib32 default below, which is a
+		// policy choice rather than a statement about the kernel.
 		Ok(_) => true,
-		Err(_) => needs_compat(),
+		Err(_) => !ships_32bit_libs(sharun_dir) && needs_compat(),
 	}
+}
+
+/// Whether this AppDir carries 32-bit libraries, and so can run 32-bit
+/// binaries. The layer is x86_64 only from top to bottom -- numbers, argument
+/// registers, ioctl requests -- and supports no 32-bit application, so an
+/// AppDir like this is left alone by default. A heuristic, not a guarantee: an
+/// AppDir without `lib32` can still exec a 32-bit binary at runtime, which is
+/// out of scope rather than handled.
+fn ships_32bit_libs(sharun_dir: &str) -> bool {
+	std::path::Path::new(sharun_dir).join("lib32").is_dir()
 }
 
 /// Auto mode: run the tracer when the kernel is old enough to plausibly need it.

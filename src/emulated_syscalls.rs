@@ -559,14 +559,19 @@ impl Emulations {
 		let Ok(regs) = ptrace::getregs(pid) else { return };
 
 		// What the call that just finished returned. The first one is the fd the
-		// whole emulation is built on.
+		// whole emulation is built on -- but only when the call is one that
+		// returns an fd: the pipe half of the timerfd emulation returns a status
+		// (0 on success), and its read end is picked up in the `Pipe` arm below.
 		let completed = match &mut active {
 			Active::Sequence { running, results, fd, .. } => {
 				results.push(regs.rax as i64);
-				if results.len() == 1 {
+				let step = running.take();
+				if results.len() == 1
+					&& matches!(step, Some(Step::Socket) | Some(Step::FcntlDupfd { .. }))
+				{
 					*fd = regs.rax as i64;
 				}
-				running.take()
+				step
 			},
 			_ => None,
 		};
@@ -589,9 +594,15 @@ impl Emulations {
 						*fd = read_end;
 					}
 				},
-				// A half-built object is worse than an error: the failure check
-				// below reports it.
-				None => {},
+				// A half-built object is worse than an error, so record one: the
+				// fd slot was never seeded from the pipe's status, and without
+				// this the sequence would complete with `Outcome::Adopted` and
+				// hand the application whatever that slot holds.
+				None => {
+					if let Active::Sequence { results, .. } = &mut active {
+						results.push(-(libc::EIO as i64));
+					}
+				},
 			}
 		}
 
