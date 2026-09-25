@@ -226,6 +226,13 @@ impl Emulations {
 			return false
 		}
 		let Ok(regs) = ptrace::getregs(pid) else { return false };
+		// x86_64 only. An i386 tracee uses the same numbers for unrelated
+		// syscalls (`waitid` 284 is `eventfd`, `kexec_load` 283 is
+		// `timerfd_create`, ...) and keeps its arguments in different registers,
+		// so matching here would hand it an emulated object it never asked for.
+		if regs.cs != 0x33 {
+			return false
+		}
 		match regs.orig_rax {
 			nr if nr == libc::SYS_close as u64 => {
 				// Stop tracking an emulated fd the application is done with.
