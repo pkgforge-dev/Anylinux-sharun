@@ -346,24 +346,12 @@ fn kernel_echoes_number() -> bool {
 }
 
 /// Whether the compatibility tracer should run for this launch.
-pub fn enabled(sharun_dir: &str) -> bool {
+pub fn enabled() -> bool {
 	match env::var(ENV_ENABLE) {
 		Ok(v) if v == "0" => false,
-		// An explicit request wins over the lib32 default below, which is a
-		// policy choice rather than a statement about the kernel.
 		Ok(_) => true,
-		Err(_) => !ships_32bit_libs(sharun_dir) && needs_compat(),
+		Err(_) => needs_compat(),
 	}
-}
-
-/// Whether this AppDir carries 32-bit libraries, and so can run 32-bit
-/// binaries. The layer is x86_64 only from top to bottom -- numbers, argument
-/// registers, ioctl requests -- and supports no 32-bit application, so an
-/// AppDir like this is left alone by default. A heuristic, not a guarantee: an
-/// AppDir without `lib32` can still exec a 32-bit binary at runtime, which is
-/// out of scope rather than handled.
-fn ships_32bit_libs(sharun_dir: &str) -> bool {
-	std::path::Path::new(sharun_dir).join("lib32").is_dir()
 }
 
 /// Auto mode: run the tracer when the kernel is old enough to plausibly need it.
@@ -994,9 +982,10 @@ impl Tracer {
 			// the ioctl requests below all mean something else to an i386
 			// tracee, so a 32-bit process (a child of the application, or a
 			// binary the application picks at runtime) is never translated. It
-			// is only traced, and its signals passed through. The `lib32` test
-			// in `enabled` says how an AppDir was built, not what it will exec,
-			// so this is the backstop for everything that test cannot see.
+			// is only traced, and its signals passed through. This is the only
+			// place that decides, so it does not matter whether the process
+			// came from a binary the AppDir ships or one it picked up
+			// elsewhere.
 			if regs.cs != 0x33 {
 				return
 			}

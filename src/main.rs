@@ -209,7 +209,7 @@ fn main() {
 			exit(0)
 		}
 		#[cfg(target_arch = "x86_64")]
-		if kernel_compat::enabled(&sharun_dir) {
+		if kernel_compat::enabled() {
 			kernel_compat::run_apprun_traced(&sharun_dir, bin_dir, &exec_args);
 		}
 		apprun::run_as_apprun(&sharun_dir, bin_dir, &exec_args);
