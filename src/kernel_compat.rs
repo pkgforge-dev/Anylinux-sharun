@@ -34,6 +34,7 @@ use nix::{
 
 const ENV_ENABLE: &str = "SHARUN_OLD_KERNEL_COMPAT";
 const ENV_DEBUG: &str = "SHARUN_OLD_KERNEL_COMPAT_DEBUG";
+const ENV_DEBUG_ALL: &str = "SHARUN_OLD_KERNEL_COMPAT_DEBUG_ALL";
 
 // futex op encoding
 const FUTEX_CMD_MASK: u32 = 0x7f;
@@ -43,14 +44,36 @@ const FUTEX_WAIT_BITSET: u32 = 9;
 const FUTEX_WAKE_BITSET: u32 = 10;
 const FUTEX_CLOCK_REALTIME: u32 = 256;
 
-fn debug() -> bool {
+// The termios2 ioctls (2.6.20) and the 2.6.17-era requests that answer them.
+// x86_64 values; the whole module already assumes that ABI.
+const TCGETS2: u64 = 0x802c_542a;
+const TCSETS2: u64 = 0x402c_542b;
+const TCSETSW2: u64 = 0x402c_542c;
+const TCSETSF2: u64 = 0x402c_542d;
+const TCGETS: u64 = 0x5401;
+const TCSETS: u64 = 0x5402;
+const TCSETSW: u64 = 0x5403;
+const TCSETSF: u64 = 0x5404;
+/// Byte offset of `c_ispeed` in `struct termios2` (4 tcflag_t, c_line, 19 cc).
+/// Everything before it has the same layout as the `struct termios` the older
+/// kernel fills in, which is what makes the translation a pure suffix.
+const TERMIOS2_ISPEED: u64 = 36;
+
+pub(crate) fn debug() -> bool {
 	matches!(env::var(ENV_DEBUG), Ok(v) if v == "1")
+}
+
+/// Even noisier than [`debug`]: the per-syscall trace of every call. Kept
+/// separate because it produces tens of megabytes in seconds and slows the
+/// tracee down enough to change its behaviour.
+pub(crate) fn debug_all() -> bool {
+	matches!(env::var(ENV_DEBUG_ALL), Ok(v) if v == "1")
 }
 
 /// True when a raw syscall return means "not implemented": -1/ENOSYS, or the
 /// syscall number itself (seen on some old kernels, where it would otherwise
 /// look like success).
-fn not_implemented(nr: libc::c_long, rc: libc::c_long) -> bool {
+pub(crate) fn not_implemented(nr: libc::c_long, rc: libc::c_long) -> bool {
 	rc == nr
 		|| (rc == -1
 			&& std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS))
@@ -74,6 +97,107 @@ fn ppoll_missing() -> bool {
 			)
 		};
 		not_implemented(libc::SYS_ppoll, rc)
+	})
+}
+
+/// Whether the kernel has the termios2 ioctls, which arrived in 2.6.20 together
+/// with the two speed fields they carry and are rejected with ENOIOCTLCMD by
+/// anything older. A version check rather than a probe: there is no tty the
+/// tracer owns to probe against, and the translation below is exact for
+/// everything except those speed fields, which an older kernel cannot report
+/// anyway. Confirmed against the sources (absent in v2.6.17 and v2.6.19,
+/// present in v2.6.20) and in a 2.6.17 guest, where TCGETS succeeds on a tty
+/// while TCGETS2 fails.
+fn termios2_missing() -> bool {
+	static MISSING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*MISSING.get_or_init(|| kernel_lt(2, 6, 20))
+}
+
+/// The request an older kernel understands in place of a termios2 one. The
+/// struct is a prefix of `struct termios2` up to the two speed fields, so only
+/// that suffix has to be dealt with separately.
+fn legacy_termios_request(request: u64) -> Option<u64> {
+	match request {
+		TCGETS2 => Some(TCGETS),
+		TCSETS2 => Some(TCSETS),
+		TCSETSW2 => Some(TCSETSW),
+		TCSETSF2 => Some(TCSETSF),
+		_ => None,
+	}
+}
+
+/// Line speed for a `Bxxxx` code in `c_cflag`. An older kernel keeps the speed
+/// there and nowhere else, so it has to be decoded to fill in termios2's own
+/// speed fields; `B0` (hang up) and the codes those kernels cannot produce
+/// report no speed.
+fn baud_from_cflag(cflag: u32) -> u32 {
+	match cflag & 0x100f {
+		0x0001 => 50,
+		0x0002 => 75,
+		0x0003 => 110,
+		0x0004 => 134,
+		0x0005 => 150,
+		0x0006 => 200,
+		0x0007 => 300,
+		0x0008 => 600,
+		0x0009 => 1200,
+		0x000a => 1800,
+		0x000b => 2400,
+		0x000c => 4800,
+		0x000d => 9600,
+		0x000e => 19200,
+		0x000f => 38400,
+		0x1001 => 57600,
+		0x1002 => 115200,
+		0x1003 => 230400,
+		0x1004 => 460800,
+		0x1005 => 500000,
+		0x1006 => 576000,
+		0x1007 => 921600,
+		0x1008 => 1_000_000,
+		0x1009 => 1_152_000,
+		0x100a => 1_500_000,
+		0x100b => 2_000_000,
+		0x100c => 2_500_000,
+		0x100d => 3_000_000,
+		0x100e => 3_500_000,
+		0x100f => 4_000_000,
+		_ => 0,
+	}
+}
+
+/// Probe once whether the kernel implements epoll_create1(2) (added in 2.6.27).
+/// Only then is it rewritten to epoll_create, which loses EPOLL_CLOEXEC.
+fn epoll_create1_missing() -> bool {
+	static MISSING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*MISSING.get_or_init(|| {
+		let rc = unsafe { libc::syscall(libc::SYS_epoll_create1, 0) };
+		let missing = not_implemented(libc::SYS_epoll_create1, rc);
+		if !missing && rc >= 0 {
+			unsafe { libc::close(rc as libc::c_int) };
+		}
+		missing
+	})
+}
+
+/// Probe once whether the kernel implements prlimit64(2) (added in 2.6.36). Only
+/// then is it rewritten to getrlimit/setrlimit: modern glibc only has the 64-bit
+/// form, so on an older kernel `getrlimit`, `setrlimit` and everything built on
+/// them (thread stack sizing, fd limit lookups) fail outright.
+fn prlimit64_missing() -> bool {
+	static MISSING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*MISSING.get_or_init(|| {
+		let mut limit: libc::rlimit64 = unsafe { std::mem::zeroed() };
+		let rc = unsafe {
+			libc::syscall(
+				libc::SYS_prlimit64,
+				0u32,
+				libc::RLIMIT_NOFILE,
+				std::ptr::null::<libc::rlimit64>(),
+				&mut limit,
+			)
+		};
+		not_implemented(libc::SYS_prlimit64, rc)
 	})
 }
 
@@ -110,6 +234,32 @@ fn getrandom_missing() -> bool {
 			libc::syscall(libc::SYS_getrandom, buf.as_mut_ptr(), buf.len(), GRND_NONBLOCK)
 		};
 		not_implemented(libc::SYS_getrandom, rc)
+	})
+}
+
+/// Clock ids to substitute, indexed by clock id; an id maps to itself when the
+/// kernel answers it. `CLOCK_MONOTONIC_RAW` arrived in 2.6.28, the two
+/// `*_COARSE` clocks in 2.6.32 and `CLOCK_BOOTTIME` in 2.6.39. `clock_gettime`
+/// itself is ancient, so a missing id comes back as `EINVAL` rather than
+/// `ENOSYS` and callers cannot tell "this kernel has no such clock" from a real
+/// failure -- in the zeroed timespec it leaves behind, WTF's `ApproximateTime`
+/// aborts. Ask the kernel once which ids it answers, then hand it one it knows:
+/// a coarse clock is the same clock at lower resolution, only more precise.
+pub(crate) fn clockid_replacements() -> &'static [u64; 8] {
+	static REPLACEMENTS: std::sync::OnceLock<[u64; 8]> = std::sync::OnceLock::new();
+	REPLACEMENTS.get_or_init(|| {
+		let mut map = [0, 1, 2, 3, 4, 5, 6, 7];
+		// CLOCK_MONOTONIC_RAW -> CLOCK_MONOTONIC, CLOCK_REALTIME_COARSE ->
+		// CLOCK_REALTIME, CLOCK_MONOTONIC_COARSE -> CLOCK_MONOTONIC,
+		// CLOCK_BOOTTIME -> CLOCK_MONOTONIC. The seccomp path needs none of
+		// this: it only exists from 3.5, where every id above is supported.
+		for (id, fallback) in [(4u64, 1u64), (5, 0), (6, 1), (7, 1)] {
+			let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+			if unsafe { libc::clock_gettime(id as libc::clockid_t, &mut ts) } != 0 {
+				map[id as usize] = fallback;
+			}
+		}
+		map
 	})
 }
 
@@ -168,7 +318,7 @@ fn nnp_exec_broken() -> bool {
 	})
 }
 
-fn kernel_lt(want_major: u64, want_minor: u64, want_patch: u64) -> bool {
+pub(crate) fn kernel_lt(want_major: u64, want_minor: u64, want_patch: u64) -> bool {
 	let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
 	if unsafe { libc::uname(&mut uts) } != 0 {
 		return false
@@ -179,6 +329,20 @@ fn kernel_lt(want_major: u64, want_minor: u64, want_patch: u64) -> bool {
 	let b = parts.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
 	let c = parts.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
 	(a, b, c) < (want_major, want_minor, want_patch)
+}
+
+/// Whether this kernel can answer an out-of-range syscall with its own number.
+/// x86_64 before 2.6.19 does, whenever the caller is being traced: the
+/// `tracesys` path jumps into the store that writes the result while `%rax`
+/// still holds the number, so `getrandom` surfaces as `318`, `copy_file_range`
+/// as `326` and so on, instead of `-ENOSYS` (fixed in 2.6.19, "x86-64: Fix
+/// ENOSYS in system call tracing"). Only numbers above the kernel's syscall
+/// table are affected; every entry up to `__NR_syscall_max` is a real function
+/// or `sys_ni_syscall`. Tracing the caller is what this layer does, so it has
+/// to undo the consequences.
+fn kernel_echoes_number() -> bool {
+	static ECHOES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*ECHOES.get_or_init(|| kernel_lt(2, 6, 19))
 }
 
 /// Whether the compatibility tracer should run for this launch.
@@ -403,6 +567,51 @@ enum Wait {
 	Syscall(Pid),
 }
 
+/// Diagnostics for a syscall-entry stop. Pure logging, and deliberately not
+/// part of the rewrite chain in `on_syscall_stop`: a logging branch in that
+/// chain shadows every branch after it, which is how a `regs.rdi <= 2` test
+/// once stopped `fcntl(1, F_DUPFD_CLOEXEC)` from being emulated whenever the
+/// trace was on, leaving the application to abort on its own stdout.
+fn log_entry(pid: Pid, regs: &libc::user_regs_struct) {
+	let nr = regs.orig_rax;
+	if nr == libc::SYS_prctl as u64 {
+		eprintln!(
+			"kernel-compat: [t{pid}] prctl({}, {:#x}, {:#x}, {:#x}, {:#x})",
+			regs.rdi as i64, regs.rsi, regs.rdx, regs.r10, regs.r8
+		);
+	} else if nr == libc::SYS_tgkill as u64 {
+		eprintln!(
+			"kernel-compat: [t{pid}] tgkill(tgid {}, tid {}, sig {})",
+			regs.rdi as i64, regs.rsi as i64, regs.rdx as i64
+		);
+	} else if nr == libc::SYS_kill as u64 {
+		eprintln!(
+			"kernel-compat: [t{pid}] kill(pid {}, sig {})",
+			regs.rdi as i64, regs.rsi as i64
+		);
+	} else if nr == libc::SYS_tkill as u64 {
+		eprintln!(
+			"kernel-compat: [t{pid}] tkill(tid {}, sig {})",
+			regs.rdi as i64, regs.rsi as i64
+		);
+	} else if nr == libc::SYS_rt_sigqueueinfo as u64 {
+		eprintln!(
+			"kernel-compat: [t{pid}] rt_sigqueueinfo(pid {}, sig {})",
+			regs.rdi as i64, regs.rsi as i64
+		);
+	} else if nr == libc::SYS_rt_tgsigqueueinfo as u64 {
+		eprintln!(
+			"kernel-compat: [t{pid}] rt_tgsigqueueinfo(tgid {}, tid {}, sig {})",
+			regs.rdi as i64, regs.rsi as i64, regs.rdx as i64
+		);
+	} else if nr == libc::SYS_fcntl as u64 {
+		eprintln!(
+			"kernel-compat: [t{pid}] fcntl(fd {}, cmd {}, arg {:#x})",
+			regs.rdi as i64, regs.rsi as i64, regs.rdx
+		);
+	}
+}
+
 fn wait_any() -> Result<Wait, Errno> {
 	let mut status: libc::c_int = 0;
 	let rc = unsafe { libc::waitpid(-1, &mut status, libc::__WALL) };
@@ -450,9 +659,19 @@ struct Tracer {
 	in_syscall: HashMap<Pid, bool>,
 	last_syscall: HashMap<Pid, u64>,
 	statx: HashMap<Pid, StatxState>,
+	/// Argument of a termios2 TCGETS2 rewritten to TCGETS, whose two speed
+	/// fields still have to be filled in once the kernel has answered.
+	termios2_get: HashMap<Pid, u64>,
+	/// Syscalls emulated with real calls inside the tracee, for the ones that
+	/// cannot be answered by rewriting the call itself (`eventfd`).
+	emulated: crate::emulated_syscalls::Emulations,
 	/// rsp to restore at syscall-exit for tracees whose translated syscall
 	/// needed scratch space carved below the stack pointer.
 	reserved: HashMap<Pid, u64>,
+	/// A signal that arrived while the tracee was inside an emulation, held back
+	/// until the sequence finishes. See the `Wait::Stopped` arm: the tracee must
+	/// not enter a signal handler between the emulation's injected calls.
+	stashed_signal: HashMap<Pid, i32>,
 	/// Pids resumed from a seccomp stop with PTRACE_SYSCALL for which the
 	/// spurious syscall-entry stop has not been consumed yet. The entry stop
 	/// must be skipped; the stop after it carries the syscall result.
@@ -493,7 +712,10 @@ impl Tracer {
 		self.in_syscall.remove(&pid);
 		self.last_syscall.remove(&pid);
 		self.statx.remove(&pid);
+		self.termios2_get.remove(&pid);
+		self.emulated.forget(pid);
 		self.reserved.remove(&pid);
+		self.stashed_signal.remove(&pid);
 		self.expect_entry.remove(&pid);
 	}
 
@@ -513,6 +735,10 @@ impl Tracer {
 		self.resume(self.child, None);
 
 		loop {
+			// Serve emulated deadlines, including the ones that interrupted the
+			// wait below: `SIGALRM` makes waitpid return, and this is where the
+			// expiration is handed to the tracee.
+			self.emulated.tick();
 			match wait_any() {
 				Ok(Wait::Exited(pid, code)) => {
 					if debug() {
@@ -545,6 +771,42 @@ impl Tracer {
 				Ok(Wait::Stopped(pid, sig)) => {
 					if debug() {
 						eprintln!("kernel-compat: pid {pid} stopped: {sig:?}");
+						if sig == libc::SIGTRAP
+							|| sig == libc::SIGABRT
+							|| sig == libc::SIGSEGV
+							|| sig == libc::SIGBUS
+							|| sig == libc::SIGILL
+						{
+							if let Ok(r) = ptrace::getregs(pid) {
+								eprintln!(
+									"kernel-compat: signal {} at {:#x} in {} rsp={:#x} rax={:#x} rdi={:#x} r11={:#x}",
+									sig as i32, r.rip, module_for(pid, r.rip), r.rsp, r.rax, r.rdi, r.r11
+								);
+								// Poor man's unwinder: every stack word that points into
+								// an executable mapping is a candidate return address, so
+								// the caller chain can be read off without gdb.
+								let ranges = executable_ranges(pid);
+								let mut hits = Vec::new();
+								for i in 0..1024u64 {
+									let Ok(word) = ptrace::read(pid, (r.rsp + 8 * i) as AddressType)
+									else {
+										break;
+									};
+									let word = word as u64;
+									if word != 0
+										&& ranges.iter().any(|(lo, hi)| word >= *lo && word < *hi)
+									{
+										hits.push(word);
+									}
+								}
+								let shown: Vec<String> = hits
+									.iter()
+									.take(24)
+									.map(|a| format!("{a:#x} in {}", module_for(pid, *a)))
+									.collect();
+								eprintln!("kernel-compat: {} stack code pointers: {}", hits.len(), shown.join(" | "));
+							}
+						}
 					}
 					// A newly traced child stops once so we can configure it.
 					if pid != self.child && !self.configured.contains(&pid) {
@@ -554,6 +816,28 @@ impl Tracer {
 							self.resume(pid, None);
 							continue;
 						}
+					}
+					// The tracee must not run application code in the middle of an
+					// emulation: a handler entered between two injected calls would
+					// have its own syscalls collected as the emulation's, and the
+					// register write-back that ends the sequence would then pull the
+					// tracee out of the handler. This is not a rare interleaving --
+					// the call being emulated is interrupted *because* this signal
+					// arrived. Hold it back and deliver it once the sequence is
+					// done, which is where the kernel would have delivered it.
+					if self.emulated.busy(pid)
+						&& sig != 0
+						&& sig != libc::SIGSTOP
+						&& sig != libc::SIGTRAP
+					{
+						if debug() {
+							eprintln!(
+								"kernel-compat: holding signal {sig} for pid {pid} until the emulation finishes"
+							);
+						}
+						self.stashed_signal.insert(pid, sig);
+						self.resume(pid, None);
+						continue;
 					}
 					// In seccomp mode a signal delivered while a translated
 					// syscall's exit stop is pending must not be resumed with
@@ -587,9 +871,12 @@ impl Tracer {
 						self.resume(pid, None);
 					}
 				},
-				Ok(Wait::Event(pid, _event)) => {
+				Ok(Wait::Event(pid, event)) => {
 					// Restart event stops with signal 0 (like strace does), not
 					// with the synthetic SIGTRAP nix reports for them.
+					if debug() {
+						eprintln!("kernel-compat: pid {pid} event {event}");
+					}
 					self.resume(pid, None);
 				},
 				Ok(Wait::Syscall(pid)) => {
@@ -604,7 +891,27 @@ impl Tracer {
 							self.resume(pid, None);
 						}
 					} else {
-						self.on_syscall_stop(pid);
+						if self.emulated.busy(pid) {
+							// Inside an emulation every stop belongs to it: the
+							// tracee is running our calls, not the application's.
+							self.emulated.step(pid);
+							if !self.emulated.busy(pid) {
+								// The sequence is over, so a signal that arrived
+								// while it ran can be delivered now: the tracee's
+								// registers are the application's again.
+								if let Some(sig) = self.stashed_signal.remove(&pid) {
+									if debug() {
+										eprintln!(
+											"kernel-compat: delivering held signal {sig} to pid {pid}"
+										);
+									}
+									self.resume(pid, Some(sig));
+									continue;
+								}
+							}
+						} else if !self.emulated.begin(pid) {
+							self.on_syscall_stop(pid);
+						}
 						self.resume(pid, None);
 					}
 				},
@@ -661,6 +968,9 @@ impl Tracer {
 				Err(_) => return,
 			};
 			self.last_syscall.insert(pid, regs.orig_rax);
+			if debug() {
+				log_entry(pid, &regs);
+			}
 			if regs.orig_rax == libc::SYS_futex as u64 {
 				translate_futex(pid, regs, &mut self.reserved);
 			} else if regs.orig_rax == libc::SYS_pipe2 as u64 && pipe2_missing() {
@@ -675,8 +985,69 @@ impl Tracer {
 				if debug() {
 					eprintln!("kernel-compat: pipe2 -> pipe (flags {:#x} dropped)", regs.rsi);
 				}
+			} else if regs.orig_rax == libc::SYS_epoll_create1 as u64 && epoll_create1_missing() {
+				// epoll_create1 (2.6.27) -> epoll_create (2.6). The size argument
+				// is ignored by every kernel that has the old call, but
+				// EPOLL_CLOEXEC is lost, so the fd is inheritable. It has to work
+				// rather than fail cleanly: uSockets does not look at the result
+				// and carries on with an epoll fd of -1, which turns every later
+				// epoll_ctl into EBADF.
+				let mut patched = regs;
+				patched.orig_rax = libc::SYS_epoll_create as u64;
+				patched.rax = libc::SYS_epoll_create as u64;
+				patched.rdi = 1;
+				let _ = ptrace::setregs(pid, patched);
+				if debug() {
+					eprintln!(
+						"kernel-compat: epoll_create1 -> epoll_create (flags {:#x} dropped)",
+						regs.rdi
+					);
+				}
 			} else if regs.orig_rax == libc::SYS_statx as u64 && statx_missing() {
 				self.setup_statx(pid, regs);
+			} else if regs.orig_rax == libc::SYS_prlimit64 as u64 && prlimit64_missing() {
+				// prlimit64(pid, resource, new, old) -> getrlimit/setrlimit.
+				// `struct rlimit` and `struct rlimit64` are the same two u64s on
+				// x86_64, so only the number and the argument order change. A
+				// caller that passes both a new and an old limit keeps the new
+				// one and gets nothing back in the old one. Only pid 0 (self) is
+				// translated; anything else is left to fail as before.
+				if regs.rdi == 0 {
+					let setting = regs.rdx != 0;
+					let number = if setting { libc::SYS_setrlimit } else { libc::SYS_getrlimit } as u64;
+					let mut patched = regs;
+					patched.orig_rax = number;
+					patched.rax = number;
+					patched.rdi = regs.rsi;
+					patched.rsi = if setting { regs.rdx } else { regs.r10 };
+					let _ = ptrace::setregs(pid, patched);
+					if debug() {
+						eprintln!(
+							"kernel-compat: prlimit64 -> {} (resource {})",
+							if setting { "setrlimit" } else { "getrlimit" },
+							regs.rsi
+						);
+					}
+				}
+			} else if regs.orig_rax == libc::SYS_ioctl as u64 && termios2_missing() {
+				self.setup_termios2(pid, regs);
+			} else if regs.orig_rax == libc::SYS_clock_gettime as u64
+				|| regs.orig_rax == libc::SYS_clock_getres as u64
+				|| regs.orig_rax == libc::SYS_clock_nanosleep as u64 {
+				// All three take the clock id as their first argument.
+				let replacements = clockid_replacements();
+				let use_instead = replacements
+					.get(regs.rdi as usize)
+					.copied()
+					.unwrap_or(regs.rdi);
+				if use_instead != regs.rdi {
+					let mut patched = regs;
+					patched.rdi = use_instead;
+					let _ = ptrace::setregs(pid, patched);
+					if debug_all() {
+						eprintln!("kernel-compat: clock id {} -> {}", regs.rdi, use_instead);
+					}
+				}
 			} else if regs.orig_rax == libc::SYS_ppoll as u64 && ppoll_missing() {
 				// ppoll -> poll, dropping the signal mask. Kernels that lack
 				// ppoll make GLib's main loop spin on the ENOSYS.
@@ -714,9 +1085,28 @@ impl Tracer {
 	fn on_syscall_exit(&mut self, pid: Pid) {
 		let mut regs = match ptrace::getregs(pid) {
 			Ok(regs) => regs,
-			Err(_) => return,
+			Err(_) => {
+				// Nothing can be completed for a tracee we cannot read; drop the
+				// pending state rather than let a later stop collect it.
+				self.termios2_get.remove(&pid);
+				self.statx.remove(&pid);
+				return
+			},
 		};
+		if debug_all() {
+			eprintln!(
+				"kernel-compat: [t{pid}] syscall {} -> {}",
+				self.last_syscall.get(&pid).copied().unwrap_or(0),
+				regs.rax as i64
+			);
+		}
+		if debug_all() && self.last_syscall.get(&pid).copied() == Some(libc::SYS_futex as u64) {
+			eprintln!("kernel-compat: [t{pid}] futex ret {}", regs.rax as i64);
+		}
 		let mut dirty = false;
+		if self.finish_termios2(pid, &mut regs) {
+			dirty = true;
+		}
 		if let Some(state) = self.statx.remove(&pid) {
 			if regs.rax == 0 {
 				let ok = read_struct(pid, state.scratch, 144)
@@ -789,7 +1179,28 @@ impl Tracer {
 				437, // openat2 (5.6)
 				439, // faccessat2 (5.8)
 			];
-			if FORCE_ENOSYS.contains(&nr) && regs.rax == nr {
+			// The list above is what has actually been observed, but a kernel
+			// that echoes at all echoes for *every* number it does not have,
+			// which is what burnt us on `copy_file_range` (326). Match those
+			// kernels generically. 2.6.17 tops out at 278 and 2.6.18 at 279, so
+			// anything above that is a syscall they simply do not have (and no
+			// real syscall can be the one being called). 64-bit tracees only:
+			// the i386 entry path returns a real -ENOSYS, and numbers this high
+			// are ordinary syscalls there.
+			const ABOVE_TABLE: u64 = 279;
+			let echoed = regs.cs == 0x33
+				&& nr > ABOVE_TABLE
+				&& kernel_echoes_number();
+			// Only an *untranslated* call can be echoing: a number the kernel
+			// really does not have is passed through untouched, whereas a
+			// rewritten one executes a different syscall whose result is its
+			// own. Without this test a translated call that legitimately returns
+			// a value equal to the number it was called as -- `epoll_create`
+			// handing back fd 291 for the rewritten `epoll_create1`, or an
+			// emulated getrandom filling a 318-byte buffer -- would be reported
+			// as ENOSYS and the fd leaked.
+			let translated = regs.orig_rax != nr;
+			if !translated && (FORCE_ENOSYS.contains(&nr) || echoed) && regs.rax == nr {
 				if debug() {
 					eprintln!(
 						"kernel-compat: syscall {nr} returned its own number; forcing ENOSYS"
@@ -856,6 +1267,73 @@ impl Tracer {
 			eprintln!("kernel-compat: statx -> fallback (buf {statxbuf:#x})");
 		}
 	}
+
+	/// The termios2 requests (2.6.20) -> the requests of the era. Everything the
+	/// kernel writes or reads back sits in the first 36 bytes, which
+	/// `struct termios2` shares with the `struct termios` of those kernels, so
+	/// the request number carries the whole translation for the TCSETS2 family.
+	/// What it cannot carry are the two speed fields the caller put after those
+	/// 36 bytes: an older kernel has no way to express a rate that is not a
+	/// `Bxxxx` code, so `c_cflag` decides the line speed there. Calls that are
+	/// not 64-bit are left alone: the request would be in a different register,
+	/// and a misread one could only do damage.
+	fn setup_termios2(&mut self, pid: Pid, mut regs: libc::user_regs_struct) {
+		if regs.cs != 0x33 {
+			return
+		}
+		let request = regs.rsi;
+		let Some(legacy) = legacy_termios_request(request) else { return };
+		let arg = regs.rdx;
+		regs.rsi = legacy;
+		if ptrace::setregs(pid, regs).is_err() {
+			return
+		}
+		if legacy == TCGETS {
+			self.termios2_get.insert(pid, arg);
+		}
+		if debug() {
+			eprintln!(
+				"kernel-compat: ioctl({request:#x}) -> {legacy:#x} (fd {})",
+				regs.rdi as i64
+			);
+		}
+	}
+
+	/// Fill in the speed fields of a translated TCGETS2 result: `struct termios2`
+	/// puts `c_ispeed`/`c_ospeed` after the `struct termios` the old kernel
+	/// filled in, and such a kernel only knows the line speed as a `Bxxxx` code
+	/// in c_cflag. Returns true if `rax` had to be replaced, which happens when
+	/// the caller's buffer cannot be written.
+	///
+	/// This assumes the call is not restarted after a signal: a restart would
+	/// re-execute the rewritten `TCGETS`, arrive here with no pending entry (the
+	/// request no longer looks like a termios2 one) and leave the speed fields
+	/// as the caller had them. The 2.6.17 `TCGETS` path only copies to user
+	/// space, so it cannot come back `-ERESTARTSYS`.
+	fn finish_termios2(&mut self, pid: Pid, regs: &mut libc::user_regs_struct) -> bool {
+		let Some(termios2) = self.termios2_get.remove(&pid) else { return false };
+		if regs.rax != 0 {
+			// The kernel refused; there is no result to complete.
+			return false
+		}
+		let speed = read_struct(pid, termios2, TERMIOS2_ISPEED as usize)
+			.map(|termios| {
+				let cflag = u32::from_le_bytes(termios[8..12].try_into().unwrap_or_default());
+				baud_from_cflag(cflag)
+			})
+			.unwrap_or(0);
+		let mut speeds = [0u8; 8];
+		speeds[0..4].copy_from_slice(&speed.to_le_bytes());
+		speeds[4..8].copy_from_slice(&speed.to_le_bytes());
+		if write_struct(pid, termios2 + TERMIOS2_ISPEED, &speeds) {
+			if debug() {
+				eprintln!("kernel-compat: termios2 speeds filled in as {speed}");
+			}
+			return false
+		}
+		regs.rax = (-(libc::EFAULT as i64)) as u64;
+		true
+	}
 }
 
 /// Rewrite a futex op to a form the kernel understands. Returns true if it
@@ -863,12 +1341,14 @@ impl Tracer {
 /// which case the caller must let the syscall reach its exit stop so `rsp` can
 /// be restored.
 fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct, reserved: &mut HashMap<Pid, u64>) -> bool {
-	// The bitset ops only exist from 2.6.25, and the private/realtime flags
-	// from 2.6.22/2.6.29. On anything newer (e.g. 3.x, where the layer still
-	// auto-enables for statx/getrandom) leave futex alone: stripping
+	// The bitset ops only exist from 2.6.25, and FUTEX_CLOCK_REALTIME from
+	// 2.6.29: on 2.6.25-2.6.28 the bitset ops are there but a realtime wait is
+	// rejected with EINVAL, which glibc answers with futex_fatal_error()
+	// instead of falling back. On anything newer (e.g. 3.x, where the layer
+	// still auto-enables for statx/getrandom) leave futex alone: stripping
 	// FUTEX_PRIVATE_FLAG changes glibc's locking behaviour and can stall the
 	// application.
-	if !kernel_lt(2, 6, 25) {
+	if !kernel_lt(2, 6, 29) {
 		return false;
 	}
 	// x86_64: futex(uaddr, op, val, timeout, uaddr2, val3) ->
@@ -876,8 +1356,11 @@ fn translate_futex(pid: Pid, mut regs: libc::user_regs_struct, reserved: &mut Ha
 	let op = regs.rsi as u32;
 	let cmd = op & FUTEX_CMD_MASK;
 	let realtime = op & FUTEX_CLOCK_REALTIME != 0;
-	if debug() {
-		eprintln!("kernel-compat: futex entry op={op:#x} cmd={cmd} timeout={:#x}", regs.r10);
+	if debug_all() {
+		eprintln!(
+			"kernel-compat: [t{pid}] futex entry op={op:#x} cmd={cmd} uaddr={:#x} val={} timeout={:#x}",
+			regs.rdi, regs.rdx as i64, regs.r10
+		);
 	}
 	let new_cmd = match cmd {
 		FUTEX_WAIT_BITSET => FUTEX_WAIT,
@@ -974,7 +1457,7 @@ fn reserve_relative_timeout(pid: Pid, timeout_ptr: u64, realtime: bool, saved_rs
 	Ok(Some(scratch))
 }
 
-fn peek_word(pid: Pid, addr: u64) -> Option<u64> {
+pub(crate) fn peek_word(pid: Pid, addr: u64) -> Option<u64> {
 	ptrace::read(pid, addr as AddressType).ok().map(|w| w as u64)
 }
 
@@ -1003,7 +1486,7 @@ fn poke_word(pid: Pid, addr: u64, val: u64) -> bool {
 	ptrace::write(pid, addr as AddressType, val as i64).is_ok()
 }
 
-fn read_struct(pid: Pid, addr: u64, len: usize) -> Option<Vec<u8>> {
+pub(crate) fn read_struct(pid: Pid, addr: u64, len: usize) -> Option<Vec<u8>> {
 	let mut out = Vec::with_capacity(len + 8);
 	let mut off = 0u64;
 	while out.len() < len {
@@ -1015,7 +1498,7 @@ fn read_struct(pid: Pid, addr: u64, len: usize) -> Option<Vec<u8>> {
 	Some(out)
 }
 
-fn write_struct(pid: Pid, addr: u64, bytes: &[u8]) -> bool {
+pub(crate) fn write_struct(pid: Pid, addr: u64, bytes: &[u8]) -> bool {
 	let mut off = 0usize;
 	while off < bytes.len() {
 		let mut chunk = [0u8; 8];
@@ -1154,7 +1637,10 @@ fn supervise(child: Pid, use_seccomp: bool) -> ! {
 		in_syscall: HashMap::new(),
 		last_syscall: HashMap::new(),
 		statx: HashMap::new(),
+		termios2_get: HashMap::new(),
+		emulated: crate::emulated_syscalls::Emulations::new(),
 		reserved: HashMap::new(),
+		stashed_signal: HashMap::new(),
 		expect_entry: HashSet::new(),
 		syscall_mode,
 		seccomp_mode,
@@ -1188,6 +1674,26 @@ fn module_for(pid: Pid, addr: u64) -> String {
 		}
 	}
 	"<unknown>".into()
+}
+
+/// Executable mappings of a tracee, for spotting return addresses on its stack.
+#[cfg(target_arch = "x86_64")]
+fn executable_ranges(pid: Pid) -> Vec<(u64, u64)> {
+	let mut out = Vec::new();
+	let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else { return out };
+	for line in maps.lines() {
+		let mut cols = line.split_whitespace();
+		let (Some(range), Some(perms)) = (cols.next(), cols.next()) else { continue };
+		if !perms.starts_with('r') || !perms.contains('x') {
+			continue;
+		}
+		let Some((start, end)) = range.split_once('-') else { continue };
+		let (Ok(start), Ok(end)) = (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16)) else {
+			continue
+		};
+		out.push((start, end));
+	}
+	out
 }
 
 #[cfg(target_arch = "x86_64")]
