@@ -1529,10 +1529,21 @@ pub(crate) fn read_struct(pid: Pid, addr: u64, len: usize) -> Option<Vec<u8>> {
 pub(crate) fn write_struct(pid: Pid, addr: u64, bytes: &[u8]) -> bool {
 	let mut off = 0usize;
 	while off < bytes.len() {
-		let mut chunk = [0u8; 8];
 		let n = (bytes.len() - off).min(8);
+		let at = addr + off as u64;
+		// `ptrace` writes a whole word, so the bytes past a short tail have to
+		// be kept: `getrandom` fills a caller's buffer of any length, and
+		// padding that word with zeros corrupts whatever the caller put above
+		// its buffer (a canary, a saved value) -- which is what made a 4-byte
+		// `getrandom` abort an application with "stack smashing detected".
+		// Read the word back and merge, instead of writing zeros.
+		let mut chunk = if n == 8 {
+			[0u8; 8]
+		} else {
+			peek_word(pid, at).unwrap_or(0).to_le_bytes()
+		};
 		chunk[..n].copy_from_slice(&bytes[off..off + n]);
-		if !poke_word(pid, addr + off as u64, u64::from_le_bytes(chunk)) {
+		if !poke_word(pid, at, u64::from_le_bytes(chunk)) {
 			return false
 		}
 		off += 8;
