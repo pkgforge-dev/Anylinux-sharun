@@ -5,4 +5,4 @@ test
 sharun*
 wrappe*
 lib/*.so
-shell/busybox
+shell/dash

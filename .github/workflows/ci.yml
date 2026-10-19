@@ -94,7 +94,7 @@ jobs:
         run: |
           export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
           export ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
-          sh tools/build-busybox.sh "$RUNNER_TEMP/zig/zig" ${{ matrix.zigtarget }} shell/busybox
+          sh tools/build-dash.sh "$RUNNER_TEMP/zig/zig" ${{ matrix.zigtarget }} shell/dash
 
       - name: Build
         run: |

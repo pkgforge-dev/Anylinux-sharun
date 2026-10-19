@@ -1,6 +1,6 @@
-//! The shell that runs AppRun.sh. It is a static busybox with only the ash
-//! shell, built by tools/build-busybox.sh and embedded into sharun, so
-//! AppImages do not depend on a host /bin/sh.
+//! The shell that runs AppRun.sh. It is a static dash, built by
+//! tools/build-dash.sh and embedded into sharun, so AppImages do not depend
+//! on a host /bin/sh.
 
 use std::{
 	ffi::CString,
@@ -17,7 +17,7 @@ extern "C" {
 	static environ: *const *const nix::libc::c_char;
 }
 
-static BUSYBOX: &[u8] = include_bytes!("../shell/busybox");
+static SHELL: &[u8] = include_bytes!("../shell/dash");
 
 const MFD_CLOEXEC: nix::libc::c_uint = 0x1;
 /// Linux 6.3. With vm.memfd_noexec=1 a memfd made without it is not executable.
@@ -25,7 +25,7 @@ const MFD_CLOEXEC: nix::libc::c_uint = 0x1;
 const MFD_EXEC: nix::libc::c_uint = 0x10;
 
 /// Anonymous in-memory file, needs Linux 3.17.
-fn memfd_with_busybox() -> Result<File, Error> {
+fn memfd_with_shell() -> Result<File, Error> {
 	let mut fd = unsafe { nix::libc::memfd_create(c"sharun-sh".as_ptr(), MFD_CLOEXEC | MFD_EXEC) };
 	if fd < 0 && Error::last_os_error().raw_os_error() == Some(nix::libc::EINVAL) {
 		fd = unsafe { nix::libc::memfd_create(c"sharun-sh".as_ptr(), MFD_CLOEXEC) };
@@ -34,7 +34,7 @@ fn memfd_with_busybox() -> Result<File, Error> {
 		return Err(Error::last_os_error())
 	}
 	let mut file = unsafe { File::from_raw_fd(fd) };
-	file.write_all(BUSYBOX)?;
+	file.write_all(SHELL)?;
 	Ok(file)
 }
 
@@ -42,7 +42,7 @@ fn memfd_with_busybox() -> Result<File, Error> {
 /// removed right after it is reopened read-only, so nothing is left behind.
 /// Reopening is needed because executing a file that is open for writing fails
 /// with ETXTBSY.
-fn tmpfile_with_busybox() -> Result<File, Error> {
+fn tmpfile_with_shell() -> Result<File, Error> {
 	let mut dirs: Vec<String> = Vec::new();
 	if let Ok(dir) = std::env::var("TMPDIR") {
 		if !dir.is_empty() {
@@ -56,7 +56,7 @@ fn tmpfile_with_busybox() -> Result<File, Error> {
 	for dir in dirs {
 		let path = format!("{dir}/.sharun-sh-{}", std::process::id());
 		let write_result = create_executable(&path).and_then(|mut file| {
-			file.write_all(BUSYBOX)?;
+			file.write_all(SHELL)?;
 			// the mode given to open() is masked by the umask
 			file.set_permissions(Permissions::from_mode(0o700))
 		});
@@ -114,7 +114,7 @@ pub fn exec_script(script: &Path, args: &[String]) -> Error {
 	let mut argv_ptrs: Vec<*const nix::libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
 	argv_ptrs.push(std::ptr::null());
 
-	let memfd_err = match memfd_with_busybox() {
+	let memfd_err = match memfd_with_shell() {
 		Ok(file) => {
 			unsafe { nix::libc::fexecve(file.as_raw_fd(), argv_ptrs.as_ptr(), environ) };
 			// the memfd exists but cannot be executed (vm.memfd_noexec, seccomp)
@@ -123,7 +123,7 @@ pub fn exec_script(script: &Path, args: &[String]) -> Error {
 		Err(err) => err,
 	};
 
-	let file = match tmpfile_with_busybox() {
+	let file = match tmpfile_with_shell() {
 		Ok(file) => file,
 		Err(tmp_err) => {
 			return Error::new(
