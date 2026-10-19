@@ -65,7 +65,6 @@ enable() {
 		echo "CONFIG_$1=y" >> .config
 	fi
 }
-sed -i 's/^CONFIG_SH_IS_ASH=.*/# CONFIG_SH_IS_ASH is not set/' .config
 # FEATURE_FANCY_ECHO: -n/-e, ASH_JOB_CONTROL: the kill, jobs, fg and bg builtins of dash
 for o in STATIC LFS ASH SH_IS_ASH FEATURE_FANCY_ECHO ASH_JOB_CONTROL ASH_OPTIMIZE_FOR_SIZE ASH_INTERNAL_GLOB \
 	ASH_ALIAS ASH_ECHO ASH_PRINTF ASH_TEST ASH_GETOPTS \
