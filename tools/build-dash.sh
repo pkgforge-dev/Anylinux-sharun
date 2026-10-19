@@ -48,6 +48,11 @@ grep -q EXP_STOPSLASH src/expand.h || {
 	echo "dash-pattern-replace.patch did not change src/expand.h" >&2
 	exit 1
 }
+# jobs.c prints the expansion in the job table, with its own table of types
+grep -qF '"/%"' src/jobs.c || {
+	echo "dash-pattern-replace.patch did not change src/jobs.c" >&2
+	exit 1
+}
 
 # The signal name table comes from a helper that is built and run on the build
 # host, so it has to see the signals of the libc the shell runs with. With the
