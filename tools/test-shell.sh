@@ -28,12 +28,28 @@ mkdir "$tmp/cwd"
 
 total=0
 failed=0
+
+# runs the case collected in $code and $tmp/want
+run_case() {
+	[ -n "$code" ] || return 0
+	total=$((total + 1))
+	(cd "$tmp/cwd" && "$shell" -c "$code") > "$tmp/got" 2>&1 < /dev/null
+	if ! cmp -s "$tmp/want" "$tmp/got"; then
+		failed=$((failed + 1))
+		printf 'FAIL: %s\n  want: %s\n  got:  %s\n' "$code" \
+			"$(tr '\n' '|' < "$tmp/want")" \
+			"$(tr '\n' '|' < "$tmp/got")"
+	fi
+	code=
+}
+
 for file; do
 	code=
 	: > "$tmp/want"
 	while IFS= read -r line; do
 		case $line in
 		'? '*)
+			run_case
 			code=${line#'? '}
 			: > "$tmp/want"
 			;;
@@ -41,20 +57,14 @@ for file; do
 			printf '%s\n' "${line#'> '}" >> "$tmp/want"
 			;;
 		'')
-			[ -n "$code" ] || continue
-			total=$((total + 1))
-			(cd "$tmp/cwd" && "$shell" -c "$code") > "$tmp/got" 2>&1 < /dev/null
-			if ! cmp -s "$tmp/want" "$tmp/got"; then
-				failed=$((failed + 1))
-				printf 'FAIL: %s\n  want: %s\n  got:  %s\n' "$code" \
-					"$(tr '\n' '|' < "$tmp/want")" \
-					"$(tr '\n' '|' < "$tmp/got")"
-			fi
-			code=
+			run_case
 			;;
 		esac
 	done < "$file"
+	# the last case of a file does not need a blank line after it
+	run_case
 done
 
 printf '%s cases, %s failed\n' "$total" "$failed"
-[ "$failed" = 0 ]
+# a case file that is empty or misspelled must not pass
+[ "$total" -gt 0 ] && [ "$failed" = 0 ]

@@ -24,19 +24,28 @@ PATCH=$(cd "$(dirname "$0")" && pwd)/dash-pattern-replace.patch
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 
+# The download is plain http and the checksum below is what protects it.
+# DASH_URL replaces the first address, the second is tried when it fails.
 curl -fL --retry 3 -o "$work/dash.tar.gz" \
-	"http://gondor.apana.org.au/~herbert/dash/files/dash-$DASH_VERSION.tar.gz"
+	"${DASH_URL:-http://gondor.apana.org.au/~herbert/dash/files/dash-$DASH_VERSION.tar.gz}" ||
+	curl -fL --retry 3 -o "$work/dash.tar.gz" \
+		"https://deb.debian.org/debian/pool/main/d/dash/dash_$DASH_VERSION.orig.tar.gz"
 echo "$DASH_SHA512  $work/dash.tar.gz" | sha512sum -c -
 tar --no-same-owner -xzf "$work/dash.tar.gz" -C "$work"
 cd "$work/dash-$DASH_VERSION"
 
 # dash has no ${var/pat/str}, ${var//pat/str}, ${var/#pat/str} and
 # ${var/%pat/str}. The patch adds them, with bash semantics (longest match).
-# git apply leaves out files that are outside of the repository it runs in, so
-# the parser is checked to have the new code.
+# Every file it changes must have the new code, one grep per file.
 git apply --whitespace=nowarn -p1 "$PATCH"
-grep -q VSREPLACEALL src/parser.h src/parser.c src/expand.c || {
-	echo "dash-pattern-replace.patch was not applied" >&2
+for f in src/parser.h src/parser.c src/expand.c; do
+	grep -q VSREPLACEALL "$f" || {
+		echo "dash-pattern-replace.patch did not change $f" >&2
+		exit 1
+	}
+done
+grep -q EXP_STOPSLASH src/expand.h || {
+	echo "dash-pattern-replace.patch did not change src/expand.h" >&2
 	exit 1
 }
 
