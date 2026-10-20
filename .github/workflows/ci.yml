@@ -103,9 +103,9 @@ jobs:
           make -C super-strip
           ./super-strip/sstrip "sharun-${{ matrix.arch }}"
 
-      # dash is shipped next to sharun, when sharun is the AppRun and there is a
-      # dash in the sharun dir it runs AppRun.sh with it. Patched to have
-      # ${var/pat/str} like bash, see tools/build-dash.sh
+      # dash is shipped in the sharun+helper-libs tar, when sharun is the
+      # AppRun and there is a dash in the sharun dir it runs AppRun.sh with it.
+      # Patched to have ${var/pat/str} like bash, see tools/build-dash.sh
       - name: Build dash
         run: |
           export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
@@ -203,7 +203,6 @@ jobs:
           fi
           tar -tvf "$tar_name"
           sha256sum "sharun-${{ matrix.arch }}" > "sharun-${{ matrix.arch }}.sha256"
-          sha256sum "dash-${{ matrix.arch }}" > "dash-${{ matrix.arch }}.sha256"
           sha256sum "$tar_name" > "$tar_name.sha256"
           cat *.sha256
 
@@ -214,8 +213,6 @@ jobs:
           path: |
             sharun-${{ matrix.arch }}
             sharun-${{ matrix.arch }}.sha256
-            dash-${{ matrix.arch }}
-            dash-${{ matrix.arch }}.sha256
             sharun+helper-libs-${{ matrix.arch }}.tar
             sharun+helper-libs-${{ matrix.arch }}.tar.sha256
 
@@ -260,5 +257,4 @@ jobs:
           make_latest: true
           files: |
             sharun-*
-            dash-*
             sharun+helper-libs-*
