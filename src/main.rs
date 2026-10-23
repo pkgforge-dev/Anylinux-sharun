@@ -13,6 +13,8 @@ mod apprun;
 mod gio_launch_desktop;
 mod bwrap_wrapper;
 mod set_appdir_env;
+mod dlopened;
+mod rpath;
 #[cfg(target_arch = "x86_64")]
 mod kernel_compat;
 #[cfg(target_arch = "x86_64")]
@@ -38,7 +40,10 @@ fn print_usage() {
 	[EXEC ARGS]...              Command line arguments for execution
 
 [ Options ]:");
-	println!("    -g,  --gen-lib-path         Generate a lib.path file
+	println!("    -g,  --gen-lib-path         Generate a lib.path file, and remove absolute rpaths and
+	                                absolute needed library paths from the ELF files in the AppDir
+	     --get-dlopened         Run a binary with LD_DEBUG=libs and print the libraries it loads:
+	                                --get-dlopened [--max-time SECONDS] [--idle-time MS] BINARY [ARGS]...
 	-v,  --version              Print version
 	-h,  --help                 Print help
 
@@ -151,7 +156,13 @@ fn main() {
 							gen_library_path(&library_path, lib_path_file)
 						}
 					}
+					if rpath::fix_appdir(&sharun_dir) > 0 {
+						exit(1)
+					}
 					return
+				}
+				"--get-dlopened" => {
+					exit(dlopened::run(&exec_args[1..]))
 				}
 				_ => {
 					bin_name = exec_args.remove(0);

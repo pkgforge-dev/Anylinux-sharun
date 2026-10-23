@@ -118,6 +118,16 @@ jobs:
         if: matrix.arch == 'x86_64'
         run: sh tools/test-shell.sh "dash-${{ matrix.arch }}"
 
+      # the x86_64 build is the one that runs on the runner. It has to be
+      # named sharun, that is how it knows what it is asked to do
+      - name: Test --get-dlopened and the rpath removal of -g
+        if: matrix.arch == 'x86_64'
+        run: |
+          mkdir "$RUNNER_TEMP/sharun-test"
+          cp sharun-x86_64 "$RUNNER_TEMP/sharun-test/sharun"
+          sh tools/test-dlopened.sh "$RUNNER_TEMP/sharun-test/sharun"
+          sh tools/test-rpath.sh "$RUNNER_TEMP/sharun-test/sharun"
+
       # ppc64 (BE) is ELFv2 but zig's powerpc64-linux-gnu glibc stub is the
       # ELFv1 one (GLIBC_2.3/2.4), which archlinuxpower's glibc does not
       # define. Build a BE copy of zig's ppc64le ELFv2 stub and link the
