@@ -113,34 +113,22 @@ fn main() {
 	let lib = format!("{sharun_dir}/lib");
 	let lib32 = format!("{sharun_dir}/lib32");
 
+	// argv[0] is only what the application gets as its own argv[0]. What to
+	// run comes from the name of this executable (/proc/self/exe), argv[0]
+	// can be changed by the caller and must not stop sharun from starting
 	let arg0 = PathBuf::from(exec_args.remove(0));
 	let arg0_name = arg0.file_name().unwrap_or_default().to_str().unwrap_or_default();
-	let arg0_dir = PathBuf::from(dirname(arg0.to_str().unwrap_or_default())).canonicalize()
-		.unwrap_or_else(|_|{
-			if let Some(which_arg0) = which(arg0_name) {
-				which_arg0.parent().unwrap_or_else(||{
-					eprintln!("Failed to get ARG0 parrent dir!");
-					exit(1)
-				}).to_path_buf()
-			} else {
-				eprintln!("Failed to find ARG0 dir!");
-				exit(1)
-			}
-	});
-
-	let mut arg0_path = arg0_dir.join(arg0_name);
-	let arg0_full_path = arg0_path.canonicalize().unwrap_or_default();
-	let arg0_full_path_name = arg0_full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-	let mut bin_name = if arg0_path.is_symlink() &&
-		arg0_full_path == Path::new(&sharun_dir).join(SHARUN_NAME) {
-		arg0_name.into()
-	} else if arg0_path.is_symlink() && find_payload(&sharun_dir, &arg0_full_path_name).is_some() {
-		arg0_full_path_name
-	} else {
-		sharun.file_name().unwrap_or_default().to_string_lossy().to_string()
+	let arg0_dir_canonical = PathBuf::from(dirname(arg0.to_str().unwrap_or_default())).canonicalize();
+	let arg0_dir = match arg0_dir_canonical {
+		Ok(dir) => dir,
+		Err(_) => which(arg0_name)
+			.and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+			.unwrap_or_else(|| PathBuf::from(&bin_dir)),
 	};
+	let mut arg0_path = arg0_dir.join(arg0_name);
+
+	let mut bin_name = sharun.file_name().unwrap_or_default().to_string_lossy().to_string();
 	drop(arg0_dir);
-	drop(arg0_full_path);
 
 	if bin_name == SHARUN_NAME {
 		if !exec_args.is_empty() {
@@ -166,11 +154,6 @@ fn main() {
 					bin_name = exec_args.remove(0);
 					let bin_path = PathBuf::from(bin_dir).join(&bin_name);
 					if let Ok(bin_full_path) = bin_path.canonicalize() {
-						let bin_full_path_name = bin_full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-						let has_payload = find_payload(&sharun_dir, &bin_full_path_name).is_some();
-						if bin_path.is_symlink() && has_payload {
-							bin_name = bin_full_path_name
-						}
 						if is_exe(&bin_full_path) {
 							add_to_env("PATH", bin_dir);
 							match is_script(&bin_path) {
