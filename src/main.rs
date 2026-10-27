@@ -80,11 +80,18 @@ fn main() {
 	// SHARUN_DIR is honored when it holds an executable sharun and AppRun.
 	// Running as AppRun never honors it, it is always set from where this
 	// AppRun is, so a SHARUN_DIR inherited from another AppImage cannot leak in
-	let is_apprun = Path::new(&exec_args[0]).file_name().is_some_and(|name| name == "AppRun");
-	let mut sharun_dir = if is_apprun { String::new() } else { realpath(&get_env_var("SHARUN_DIR")) };
-	if sharun_dir.is_empty() ||
-		!(is_exe(&Path::new(&sharun_dir).join(SHARUN_NAME)) &&
-		  is_exe(&Path::new(&sharun_dir).join("AppRun")))
+	let arg0_file_name = Path::new(&exec_args[0]).file_name();
+	let is_apprun = arg0_file_name.is_some_and(|name| name == "AppRun");
+
+	let mut sharun_dir = String::new();
+	if !is_apprun {
+		sharun_dir = realpath(&get_env_var("SHARUN_DIR"));
+	}
+
+	let honor_sharun_dir = !sharun_dir.is_empty() &&
+		is_sharun_dir(Path::new(&sharun_dir));
+
+	if !honor_sharun_dir
 	{
 		sharun_dir = sharun.parent().unwrap_or_else(||{
 			eprintln!("Failed to get sharun parrent dir!");
@@ -159,7 +166,8 @@ fn main() {
 					let bin_path = PathBuf::from(bin_dir).join(&bin_name);
 					if let Ok(bin_full_path) = bin_path.canonicalize() {
 						let bin_full_path_name = bin_full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-						if bin_path.is_symlink() && find_payload(&sharun_dir, &bin_full_path_name).is_some() {
+						let has_payload = find_payload(&sharun_dir, &bin_full_path_name).is_some();
+						if bin_path.is_symlink() && has_payload {
 							bin_name = bin_full_path_name
 						}
 						if is_exe(&bin_full_path) {

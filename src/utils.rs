@@ -117,23 +117,8 @@ pub fn is_hardlink(path1: &Path, path2: &Path) -> bool {
 	false
 }
 
-pub fn is_same_rootdir(rootdir: &Path, path1: &Path, path2: &Path) -> bool {
-	if let Ok(abs_path1) = path1.canonicalize() {
-		if let Ok(abs_path2) = path2.canonicalize() {
-			if let Ok(abs_rootdir) = &rootdir.canonicalize() {
-				return abs_path1.starts_with(abs_rootdir) && abs_path2.starts_with(abs_rootdir)
-			}
-		}
-	}
-	false
-}
-
 pub fn is_writable(path: &str) -> bool {
 	access(path, AccessFlags::W_OK).is_ok()
-}
-
-pub fn is_dir(path: &str) -> bool {
-	Path::new(path).is_dir()
 }
 
 pub fn is_file(path: &Path) -> bool {
@@ -148,6 +133,12 @@ pub fn is_exe(path: &Path) -> bool {
 		return metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 	}
 	false
+}
+
+/// A directory sharun can use as SHARUN_DIR: it has an executable sharun
+/// and an executable AppRun.
+pub fn is_sharun_dir(dir: &Path) -> bool {
+	is_exe(&dir.join("sharun")) && is_exe(&dir.join("AppRun"))
 }
 
 /// An AppDir is the directory with `.bin` (payload dir) or the older `shared`.
