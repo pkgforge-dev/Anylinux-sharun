@@ -150,6 +150,28 @@ pub fn is_exe(path: &Path) -> bool {
 	false
 }
 
+/// An AppDir is the directory with `.bin` (payload dir) or the older `shared`.
+pub fn is_sharun_root(dir: &Path) -> bool {
+	dir.join(".bin").is_dir() || dir.join("shared").is_dir()
+}
+
+/// Real program of a `bin/<name>` hardlink: `<sharun_dir>/.bin/<name>`, or
+/// the older `<sharun_dir>/shared/bin/<name>` when there is none. `.bin`
+/// keeps `../lib` and `../shared` relative to the AppDir, and
+/// /proc/self/exe keeps the real name of programs the kernel executes.
+pub fn find_payload(sharun_dir: &str, name: &str) -> Option<String> {
+	if name.is_empty() || name.contains('/') {
+		return None
+	}
+	for dir in [".bin", "shared/bin"] {
+		let candidate = Path::new(sharun_dir).join(dir).join(name);
+		if candidate.exists() {
+			return Some(candidate.to_string_lossy().to_string())
+		}
+	}
+	None
+}
+
 pub fn which(executable: &str) -> Option<PathBuf> {
 	if let Ok(path) = env::var("PATH") {
 		for dir in path.split(':') {
