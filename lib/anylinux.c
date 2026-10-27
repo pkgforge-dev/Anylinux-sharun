@@ -22,6 +22,10 @@
  *
  * It also makes sure $APPDIR/bin is always present in PATH, since apps
  * may clear their own environ before executing a helper binary
+ *
+ * It also makes getauxval(AT_EXECFN) agree with /proc/self/exe for libQt6Core
+ * only. ld.so rewrites AT_EXECFN to the program it was asked to load
+ * (shared/bin/<app>), while /proc/self/exe is the bin/<app> hardlink of sharun
 */
 
 #ifndef _GNU_SOURCE
@@ -35,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/auxv.h>
 #include <sys/param.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -630,4 +635,40 @@ VISIBLE void *dlopen(const char *filename, int flags) {
 
 	DEBUG_PRINT("dlopen pass-through: %s\n", filename ? filename : "(NULL)");
 	return dlopen_orig(filename, flags);
+}
+
+// AT_EXECFN is set by ld.so to the real binary in shared/bin, but
+// /proc/self/exe is the sharun hardlink in bin. Qt 6.12+ reads AT_EXECFN
+// before /proc/self/exe, so only callers inside libQt6Core see the bin
+// path. Every other caller keeps the real value.
+static char execfn_path[PATH_MAX];
+static int execfn_ready;
+
+__attribute__((constructor))
+static void init_execfn(void) {
+	ssize_t n = readlink("/proc/self/exe", execfn_path, sizeof(execfn_path) - 1);
+	if (n > 0 && execfn_path[0] == '/') {
+		execfn_path[n] = '\0';
+		execfn_ready = 1;
+	}
+}
+
+static int caller_is_qt6core(void *addr) {
+	Dl_info info;
+	if (!dladdr(addr, &info) || !info.dli_fname)
+		return 0;
+	const char *base = strrchr(info.dli_fname, '/');
+	base = base ? base + 1 : info.dli_fname;
+	return strncmp(base, "libQt6Core.so", 13) == 0;
+}
+
+VISIBLE unsigned long getauxval(unsigned long type) {
+	typedef unsigned long (*getauxval_func_t)(unsigned long);
+	static getauxval_func_t getauxval_orig;
+	if (!getauxval_orig)
+		getauxval_orig = (getauxval_func_t)dlsym(RTLD_NEXT, "getauxval");
+	if (type == AT_EXECFN && execfn_ready &&
+	    caller_is_qt6core(__builtin_return_address(0)))
+		return (unsigned long)execfn_path;
+	return getauxval_orig ? getauxval_orig(type) : 0;
 }
