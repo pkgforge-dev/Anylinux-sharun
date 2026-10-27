@@ -80,8 +80,9 @@ fn main() {
 	// SHARUN_DIR is honored when it holds an executable sharun and AppRun.
 	// Running as AppRun never honors it, it is always set from where this
 	// AppRun is, so a SHARUN_DIR inherited from another AppImage cannot leak in
-	let arg0_file_name = Path::new(&exec_args[0]).file_name();
-	let is_apprun = arg0_file_name.is_some_and(|name| name == "AppRun");
+	// the name comes from /proc/self/exe, argv[0] can be changed by the caller
+	let exe_file_name = sharun.file_name();
+	let is_apprun = exe_file_name.is_some_and(|name| name == "AppRun");
 
 	let mut sharun_dir = String::new();
 	if !is_apprun {
