@@ -150,6 +150,24 @@ pub fn is_exe(path: &Path) -> bool {
 	false
 }
 
+/// Real payload of a `bin/<name>` hardlink stored as `.<name>.sharun` in the
+/// directory sharun runs from, or in `bin_dir` when sharun runs from the
+/// AppDir root. The file does not need the exec bit.
+pub fn hidden_payload(sharun: &Path, bin_dir: &str, name: &str) -> Option<String> {
+	if name.is_empty() || name.contains('/') {
+		return None
+	}
+	let file_name = format!(".{name}.sharun");
+	let own_dir = sharun.parent().map(|dir| dir.to_path_buf());
+	for dir in own_dir.iter().map(|dir| dir.as_path()).chain([Path::new(bin_dir)]) {
+		let candidate = dir.join(&file_name);
+		if candidate.is_file() {
+			return Some(candidate.to_string_lossy().to_string())
+		}
+	}
+	None
+}
+
 pub fn which(executable: &str) -> Option<PathBuf> {
 	if let Ok(path) = env::var("PATH") {
 		for dir in path.split(':') {

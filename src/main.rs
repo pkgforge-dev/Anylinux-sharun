@@ -216,8 +216,17 @@ fn main() {
 	} else if bin_name == "gio-launch-desktop" {
 		gio_launch_desktop::run(&exec_args);
 	}
+	// payload lookup order: `.<name>.sharun` next to the hardlink, then
+	// the classic shared/bin/<name>
+	let hidden_bin = if Path::new(&bin_name).is_absolute() {
+		None
+	} else {
+		hidden_payload(&sharun, bin_dir, &bin_name)
+	};
 	let mut bin = if Path::new(&bin_name).is_absolute() {
 		bin_name.clone()
+	} else if let Some(hidden) = &hidden_bin {
+		hidden.clone()
 	} else {
 		format!("{shared_bin}/{bin_name}")
 	};
@@ -387,7 +396,7 @@ fn main() {
 		None
 	};
 
-	if bin_name == "bwrap" && !Path::new(&format!("{shared_bin}/bwrap")).exists() {
+	if bin_name == "bwrap" && hidden_bin.is_none() && !Path::new(&format!("{shared_bin}/bwrap")).exists() {
 		let hostpath = get_env_var("HOSTPATH");
 		let search_path = if !hostpath.is_empty() { hostpath } else { get_env_var("PATH") };
 		match bwrap_wrapper::find_system_bwrap(&search_path, &sharun) {
