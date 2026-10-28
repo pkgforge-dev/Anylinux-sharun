@@ -77,14 +77,22 @@ fn main() {
 
 	let mut exec_args: Vec<String> = env::args().collect();
 
-	let mut sharun_dir = realpath(&get_env_var("SHARUN_DIR"));
-	if sharun_dir.is_empty() ||
-		!(is_dir(&sharun_dir) && {
-			let sharun_dir_path = Path::new(&sharun_dir);
-			let sharun_path = sharun_dir_path.join(SHARUN_NAME);
-			sharun_dir_path.join("shared").is_dir() && is_exe(&sharun_path) &&
-			is_same_rootdir(sharun_dir_path, &sharun, &sharun_path)
-		})
+	// SHARUN_DIR is honored when it holds an executable sharun and AppRun.
+	// Running as AppRun never honors it, it is always set from where this
+	// AppRun is, so a SHARUN_DIR inherited from another AppImage cannot leak in
+	// the name comes from /proc/self/exe, argv[0] can be changed by the caller
+	let exe_file_name = sharun.file_name();
+	let is_apprun = exe_file_name.is_some_and(|name| name == "AppRun");
+
+	let mut sharun_dir = String::new();
+	if !is_apprun {
+		sharun_dir = realpath(&get_env_var("SHARUN_DIR"));
+	}
+
+	let honor_sharun_dir = !sharun_dir.is_empty() &&
+		is_sharun_dir(Path::new(&sharun_dir));
+
+	if !honor_sharun_dir
 	{
 		sharun_dir = sharun.parent().unwrap_or_else(||{
 			eprintln!("Failed to get sharun parrent dir!");
@@ -92,7 +100,7 @@ fn main() {
 		}).to_str().unwrap_or_default().to_string();
 		let lower_dir = &format!("{sharun_dir}/../");
 		if basename(&sharun_dir) == "bin" &&
-			is_dir(&format!("{lower_dir}shared")) {
+			is_sharun_root(Path::new(lower_dir)) {
 			sharun_dir = realpath(lower_dir)
 		}
 		env::set_var("SHARUN_DIR", &sharun_dir)
@@ -101,37 +109,26 @@ fn main() {
 	let bin_dir = &format!("{sharun_dir}/bin");
 	let shared_dir = &format!("{sharun_dir}/shared");
 	let shared_bin = &format!("{shared_dir}/bin");
+	let dot_bin = &format!("{sharun_dir}/.bin");
 	let lib = format!("{sharun_dir}/lib");
 	let lib32 = format!("{sharun_dir}/lib32");
 
+	// argv[0] is only what the application gets as its own argv[0]. What to
+	// run comes from the name of this executable (/proc/self/exe), argv[0]
+	// can be changed by the caller and must not stop sharun from starting
 	let arg0 = PathBuf::from(exec_args.remove(0));
 	let arg0_name = arg0.file_name().unwrap_or_default().to_str().unwrap_or_default();
-	let arg0_dir = PathBuf::from(dirname(arg0.to_str().unwrap_or_default())).canonicalize()
-		.unwrap_or_else(|_|{
-			if let Some(which_arg0) = which(arg0_name) {
-				which_arg0.parent().unwrap_or_else(||{
-					eprintln!("Failed to get ARG0 parrent dir!");
-					exit(1)
-				}).to_path_buf()
-			} else {
-				eprintln!("Failed to find ARG0 dir!");
-				exit(1)
-			}
-	});
-
-	let mut arg0_path = arg0_dir.join(arg0_name);
-	let arg0_full_path = arg0_path.canonicalize().unwrap_or_default();
-	let arg0_full_path_name = arg0_full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-	let mut bin_name = if arg0_path.is_symlink() &&
-		arg0_full_path == Path::new(&sharun_dir).join(SHARUN_NAME) {
-		arg0_name.into()
-	} else if arg0_path.is_symlink() && Path::new(&shared_bin).join(&arg0_full_path_name).exists() {
-		arg0_full_path_name
-	} else {
-		sharun.file_name().unwrap_or_default().to_string_lossy().to_string()
+	let arg0_dir_canonical = PathBuf::from(dirname(arg0.to_str().unwrap_or_default())).canonicalize();
+	let arg0_dir = match arg0_dir_canonical {
+		Ok(dir) => dir,
+		Err(_) => which(arg0_name)
+			.and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+			.unwrap_or_else(|| PathBuf::from(&bin_dir)),
 	};
+	let mut arg0_path = arg0_dir.join(arg0_name);
+
+	let mut bin_name = sharun.file_name().unwrap_or_default().to_string_lossy().to_string();
 	drop(arg0_dir);
-	drop(arg0_full_path);
 
 	if bin_name == SHARUN_NAME {
 		if !exec_args.is_empty() {
@@ -157,10 +154,6 @@ fn main() {
 					bin_name = exec_args.remove(0);
 					let bin_path = PathBuf::from(bin_dir).join(&bin_name);
 					if let Ok(bin_full_path) = bin_path.canonicalize() {
-						let bin_full_path_name = bin_full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-						if bin_path.is_symlink() && Path::new(&shared_bin).join(&bin_full_path_name).exists() {
-							bin_name = bin_full_path_name
-						}
 						if is_exe(&bin_full_path) {
 							add_to_env("PATH", bin_dir);
 							match is_script(&bin_path) {
@@ -219,7 +212,7 @@ fn main() {
 	let mut bin = if Path::new(&bin_name).is_absolute() {
 		bin_name.clone()
 	} else {
-		format!("{shared_bin}/{bin_name}")
+		find_payload(&sharun_dir, &bin_name).unwrap_or_else(|| format!("{shared_bin}/{bin_name}"))
 	};
 
 	if !Path::new(&bin).exists() && !Path::new(&bin_name).is_absolute() {
@@ -231,7 +224,7 @@ fn main() {
 		if let Some(path) = which(&bin_name) {
 			bin = path.to_string_lossy().to_string()
 		} else {
-			eprintln!("Failed to find '{bin_name}' in PATH or '{shared_bin}'");
+			eprintln!("Failed to find '{bin_name}' in PATH, '{dot_bin}' or '{shared_bin}'");
 			exit(1)
 		}
 	}
@@ -387,7 +380,7 @@ fn main() {
 		None
 	};
 
-	if bin_name == "bwrap" && !Path::new(&format!("{shared_bin}/bwrap")).exists() {
+	if bin_name == "bwrap" && find_payload(&sharun_dir, "bwrap").is_none() {
 		let hostpath = get_env_var("HOSTPATH");
 		let search_path = if !hostpath.is_empty() { hostpath } else { get_env_var("PATH") };
 		match bwrap_wrapper::find_system_bwrap(&search_path, &sharun) {

@@ -118,6 +118,11 @@ jobs:
         if: matrix.arch == 'x86_64'
         run: sh tools/test-shell.sh "dash-${{ matrix.arch }}"
 
+      # only the x86_64 build runs on the runner
+      - name: Test .bin payload lookup
+        if: matrix.arch == 'x86_64'
+        run: sh tools/test-dot-bin.sh "sharun-${{ matrix.arch }}"
+
       # ppc64 (BE) is ELFv2 but zig's powerpc64-linux-gnu glibc stub is the
       # ELFv1 one (GLIBC_2.3/2.4), which archlinuxpower's glibc does not
       # define. Build a BE copy of zig's ppc64le ELFv2 stub and link the

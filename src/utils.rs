@@ -117,23 +117,8 @@ pub fn is_hardlink(path1: &Path, path2: &Path) -> bool {
 	false
 }
 
-pub fn is_same_rootdir(rootdir: &Path, path1: &Path, path2: &Path) -> bool {
-	if let Ok(abs_path1) = path1.canonicalize() {
-		if let Ok(abs_path2) = path2.canonicalize() {
-			if let Ok(abs_rootdir) = &rootdir.canonicalize() {
-				return abs_path1.starts_with(abs_rootdir) && abs_path2.starts_with(abs_rootdir)
-			}
-		}
-	}
-	false
-}
-
 pub fn is_writable(path: &str) -> bool {
 	access(path, AccessFlags::W_OK).is_ok()
-}
-
-pub fn is_dir(path: &str) -> bool {
-	Path::new(path).is_dir()
 }
 
 pub fn is_file(path: &Path) -> bool {
@@ -148,6 +133,34 @@ pub fn is_exe(path: &Path) -> bool {
 		return metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 	}
 	false
+}
+
+/// A directory sharun can use as SHARUN_DIR: it has an executable sharun
+/// and an executable AppRun.
+pub fn is_sharun_dir(dir: &Path) -> bool {
+	is_exe(&dir.join("sharun")) && is_exe(&dir.join("AppRun"))
+}
+
+/// An AppDir is the directory with `.bin` (payload dir) or the older `shared`.
+pub fn is_sharun_root(dir: &Path) -> bool {
+	dir.join(".bin").is_dir() || dir.join("shared").is_dir()
+}
+
+/// Real program of a `bin/<name>` hardlink: `<sharun_dir>/.bin/<name>`, or
+/// the older `<sharun_dir>/shared/bin/<name>` when there is none. `.bin`
+/// keeps `../lib` and `../shared` relative to the AppDir, and
+/// /proc/self/exe keeps the real name of programs the kernel executes.
+pub fn find_payload(sharun_dir: &str, name: &str) -> Option<String> {
+	if name.is_empty() || name.contains('/') {
+		return None
+	}
+	for dir in [".bin", "shared/bin"] {
+		let candidate = Path::new(sharun_dir).join(dir).join(name);
+		if candidate.exists() {
+			return Some(candidate.to_string_lossy().to_string())
+		}
+	}
+	None
 }
 
 pub fn which(executable: &str) -> Option<PathBuf> {
