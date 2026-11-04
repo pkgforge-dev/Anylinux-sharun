@@ -223,6 +223,12 @@ fn main() {
 		}
 		if let Some(path) = which(&bin_name) {
 			bin = path.to_string_lossy().to_string()
+		} else if let Some(payload) = find_payload(&sharun_dir, arg0_name) {
+			// a program that re-execs /proc/self/exe (runc and crun do it through
+			// a sealed memfd) comes back named after that memfd instead of after
+			// itself, so the name the caller used is the only one left
+			bin_name = arg0_name.to_string();
+			bin = payload
 		} else {
 			eprintln!("Failed to find '{bin_name}' in PATH, '{dot_bin}' or '{shared_bin}'");
 			exit(1)
