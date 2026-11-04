@@ -117,6 +117,22 @@ pub fn is_hardlink(path1: &Path, path2: &Path) -> bool {
 	false
 }
 
+/// True when the process was re-executed through `/proc/self/exe` or a sealed
+/// memfd copy of it, as podman/containers-storage and runc/crun do. Those
+/// re-execs pass a helper name as argv[0] and some of them compare it
+/// exactly, so sharun must forward the caller's argv[0] unchanged.
+pub fn is_reexec() -> bool {
+	let ptr = unsafe { nix::libc::getauxval(nix::libc::AT_EXECFN) }
+		as *const nix::libc::c_char;
+	if ptr.is_null() {
+		return false
+	}
+	let execfn = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes();
+	execfn == b"/proc/self/exe" ||
+		execfn.starts_with(b"/memfd:") ||
+		execfn.ends_with(b" (deleted)")
+}
+
 pub fn is_writable(path: &str) -> bool {
 	access(path, AccessFlags::W_OK).is_ok()
 }

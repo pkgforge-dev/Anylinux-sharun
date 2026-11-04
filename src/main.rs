@@ -417,7 +417,16 @@ fn main() {
 		if is_elf32_bin {
 			interpreter_args.push(CString::new(&*bin).unwrap_or_default())
 		} else {
-			interpreter_args.push(CString::new(arg0_path.to_str().unwrap_or_default()).unwrap_or_default())
+			// Re-execs through /proc/self/exe (podman/containers-storage,
+			// runc/crun) set argv[0] to a helper name and expect it back
+			// verbatim; containers/storage compares it exactly. Keep the
+			// canonical path for every normal launch.
+			let argv0 = if is_reexec() {
+				arg0.to_string_lossy().to_string()
+			} else {
+				arg0_path.to_string_lossy().to_string()
+			};
+			interpreter_args.push(CString::new(argv0).unwrap_or_default())
 		}
 
 		let preload = read_preload(&sharun_dir, is_elf32_bin);
