@@ -625,7 +625,7 @@ mod tests {
 /// Only honoured for re-execs, so a stale value inherited by a child cannot
 /// change what an ordinary launch runs, and gated by a depth counter so a
 /// program that keeps re-execing itself cannot spin here.
-pub fn reexec_payload(sharun_dir: &str) -> Option<String> {
+pub fn reexec_payload(sharun_dir: &str) -> Option<(String, String)> {
 	if !is_reexec() {
 		return None
 	}
@@ -633,8 +633,6 @@ pub fn reexec_payload(sharun_dir: &str) -> Option<String> {
 	if name.is_empty() || name.contains('/') {
 		return None
 	}
-	if find_payload(sharun_dir, &name).is_none() {
-		return None
-	}
-	Some(name)
+	let path = find_payload(sharun_dir, &name)?;
+	Some((name, path))
 }

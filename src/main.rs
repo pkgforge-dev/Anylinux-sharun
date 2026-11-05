@@ -230,12 +230,12 @@ fn main() {
 			// itself, so the name the caller used is the only one left
 			bin_name = arg0_name.to_string();
 			bin = payload
-		} else if let Some(payload) = reexec_payload(&sharun_dir) {
+		} else if let Some((name, path)) = reexec_payload(&sharun_dir) {
 			// the caller's argv[0] named nothing either: the program cloned
 			// itself into a memfd and exec'd that, so the only record of what it
 			// was is the one we left in the environment before starting it
-			bin_name = payload;
-			bin = find_payload(&sharun_dir, &bin_name).unwrap_or_default();
+			bin_name = name;
+			bin = path;
 			recovered = true
 		} else {
 			eprintln!("Failed to find '{bin_name}' in PATH, '{dot_bin}' or '{shared_bin}'");
