@@ -130,6 +130,7 @@ pub fn is_reexec() -> bool {
 	let execfn = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes();
 	execfn == b"/proc/self/exe" ||
 		execfn.starts_with(b"/memfd:") ||
+		execfn.starts_with(b"/dev/fd/") ||
 		execfn.ends_with(b" (deleted)")
 }
 
@@ -611,4 +612,29 @@ mod tests {
 		assert_eq!(bytes.len(), 192);
 		std::fs::remove_file(&path).unwrap();
 	}
+}
+
+/// Name of the program to run when the executable path no longer says it.
+///
+/// A program that clones `/proc/self/exe` into a sealed memfd and execs that
+/// gets sharun back instead of itself, because `/proc/self/exe` is the sharun
+/// hardlink. The re-entered process has no exe name to derive a payload from
+/// (`/proc/self/exe` is `/memfd:...`), and argv[0] may not carry one either, so
+/// the name sharun recorded before starting the program is the only one left.
+///
+/// Only honoured for re-execs, so a stale value inherited by a child cannot
+/// change what an ordinary launch runs, and gated by a depth counter so a
+/// program that keeps re-execing itself cannot spin here.
+pub fn reexec_payload(sharun_dir: &str) -> Option<String> {
+	if !is_reexec() {
+		return None
+	}
+	let name = get_env_var("SHARUN_BIN_NAME");
+	if name.is_empty() || name.contains('/') {
+		return None
+	}
+	if find_payload(sharun_dir, &name).is_none() {
+		return None
+	}
+	Some(name)
 }
