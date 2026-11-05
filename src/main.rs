@@ -209,6 +209,7 @@ fn main() {
 	} else if bin_name == "gio-launch-desktop" {
 		gio_launch_desktop::run(&exec_args);
 	}
+	let mut recovered = false;
 	let mut bin = if Path::new(&bin_name).is_absolute() {
 		bin_name.clone()
 	} else {
@@ -229,10 +230,35 @@ fn main() {
 			// itself, so the name the caller used is the only one left
 			bin_name = arg0_name.to_string();
 			bin = payload
+		} else if let Some(payload) = reexec_payload(&sharun_dir) {
+			// the caller's argv[0] named nothing either: the program cloned
+			// itself into a memfd and exec'd that, so the only record of what it
+			// was is the one we left in the environment before starting it
+			bin_name = payload;
+			bin = find_payload(&sharun_dir, &bin_name).unwrap_or_default();
+			recovered = true
 		} else {
 			eprintln!("Failed to find '{bin_name}' in PATH, '{dot_bin}' or '{shared_bin}'");
 			exit(1)
 		}
+	}
+
+	// a program that clones /proc/self/exe into a memfd and execs it gets sharun
+	// back with no executable path left to derive a payload from, so record what
+	// we are about to run. Only a hop that had to use that record is counted:
+	// an ordinary launch through bin/<name> knows its payload and starts the
+	// count over, so a deep process tree cannot trip the limit. crun stops on
+	// its own anyway, by seeing the seal bits of the memfd (is_self_cloned)
+	env::set_var("SHARUN_BIN_NAME", &bin_name);
+	if recovered {
+		let depth: u32 = get_env_var("SHARUN_REEXEC_DEPTH").parse().unwrap_or(0);
+		if depth >= 8 {
+			eprintln!("Gave up re-executing '{bin_name}' after {depth} hops");
+			exit(1)
+		}
+		env::set_var("SHARUN_REEXEC_DEPTH", (depth + 1).to_string());
+	} else {
+		env::remove_var("SHARUN_REEXEC_DEPTH")
 	}
 
 	let is_elf32_bin = is_elf32(&bin).unwrap_or_else(|err|{
