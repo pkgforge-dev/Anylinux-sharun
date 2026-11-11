@@ -36,6 +36,7 @@
 #include <limits.h>
 #include <locale.h>
 #include <spawn.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -542,6 +543,67 @@ VISIBLE int execv(const char *filename, char *const argv[]) {
 	return execve(filename, argv, environ);
 }
 
+// build the argv array of the execl family from the varargs, ap is left
+// positioned right after the terminating NULL
+static char **collect_argv(const char *arg, va_list ap) {
+	size_t count = 0;
+	va_list copy;
+
+	va_copy(copy, ap);
+	for (const char *a = arg; a; a = va_arg(copy, char *))
+		count++;
+	va_end(copy);
+
+	char **argv = malloc((count + 1) * sizeof(char *));
+	if (!argv)
+		return NULL;
+
+	size_t i = 0;
+	for (const char *a = arg; a; a = va_arg(ap, char *))
+		argv[i++] = (char *)a;
+	argv[i] = NULL;
+	return argv;
+}
+
+VISIBLE int execl(const char *path, const char *arg, ...) {
+	DEBUG_PRINT("execl call hijacked: %s\n", path);
+	va_list ap;
+	va_start(ap, arg);
+	char **argv = collect_argv(arg, ap);
+	va_end(ap);
+
+	if (!argv) {
+		errno = ENOMEM;
+		return -1;
+	}
+
+	int ret = execv(path, (char *const *)argv);
+	int saved_errno = errno;
+	free(argv);
+	errno = saved_errno;
+	return ret;
+}
+
+VISIBLE int execle(const char *path, const char *arg, ...) {
+	DEBUG_PRINT("execle call hijacked: %s\n", path);
+	va_list ap;
+	va_start(ap, arg);
+	char **argv = collect_argv(arg, ap);
+	if (!argv) {
+		va_end(ap);
+		errno = ENOMEM;
+		return -1;
+	}
+	char *const *envp = va_arg(ap, char *const *);
+	va_end(ap);
+
+	int ret = execve(path, (char *const *)argv, envp);
+	int saved_errno = errno;
+	free(argv);
+	errno = saved_errno;
+	return ret;
+}
+
 VISIBLE int execvpe(const char *filename, char *const argv[], char *const envp[]) {
 	DEBUG_PRINT("execvpe hijacked: %s\n", filename);
 	execve_func_t execvpe_orig = dlsym(RTLD_NEXT, "execvpe");
@@ -556,6 +618,25 @@ VISIBLE int execvpe(const char *filename, char *const argv[], char *const envp[]
 VISIBLE int execvp(const char *filename, char *const argv[]) {
 	DEBUG_PRINT("execvp hijacked: %s\n", filename);
 	return execvpe(filename, argv, environ);
+}
+
+VISIBLE int execlp(const char *file, const char *arg, ...) {
+	DEBUG_PRINT("execlp call hijacked: %s\n", file);
+	va_list ap;
+	va_start(ap, arg);
+	char **argv = collect_argv(arg, ap);
+	va_end(ap);
+
+	if (!argv) {
+		errno = ENOMEM;
+		return -1;
+	}
+
+	int ret = execvp(file, (char *const *)argv);
+	int saved_errno = errno;
+	free(argv);
+	errno = saved_errno;
+	return ret;
 }
 
 VISIBLE int posix_spawn(pid_t *pid, const char *path,
