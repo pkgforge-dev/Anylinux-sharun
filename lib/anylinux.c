@@ -418,8 +418,6 @@ static int spawn_common(posix_spawn_func_t fn,
 	if (is_external_process(path_to_check)) {
 		DEBUG_PRINT("External process detected; cleaning environment\n");
 
-		restore_env_dirs(environ, 1);
-
 		env = create_cleaned_env(envp);
 
 		if (!env) {
