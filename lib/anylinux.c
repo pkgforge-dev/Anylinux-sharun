@@ -325,8 +325,8 @@ static void restore_env_dirs(char **env) {
 
 static char* const* create_cleaned_env(char* const* original_env) {
 	const char *appdir = getenv("APPDIR");
-	if (!appdir) {
-		DEBUG_PRINT("APPDIR is NOT set!\n");
+	if (!appdir || !*appdir) {
+		DEBUG_PRINT("APPDIR is empty or NOT set!\n");
 		return original_env;
 	}
 	DEBUG_PRINT("APPDIR is set: %s\n", appdir);
@@ -383,8 +383,8 @@ static void env_free(char* const *env) {
 
 static int is_external_process(const char *filename) {
 	const char *appdir = getenv("APPDIR");
-	if (!appdir) {
-		DEBUG_PRINT("APPDIR not set; treating %s as internal process\n", filename);
+	if (!appdir || !*appdir) {
+		DEBUG_PRINT("APPDIR is empty or not set; treating %s as internal process\n", filename);
 		return 0;
 	}
 
@@ -447,59 +447,57 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 	// troubleshooting with APPIMAGE_DEBUG=1
 	unsetenv("LD_DEBUG");
 
-	// execve(2) accepts a NULL envp as an empty environment. There is
-	// nothing to clean in that case and no PATH can be injected into it.
-	if (!envp) {
-		int ret = function(filename, argv, NULL);
-		if (fullpath && fullpath != filename) free(fullpath);
-		return ret;
-	}
-
 	// remove problematic variables
 	char* const *env = envp;
 	const char* path_to_check = fullpath ? fullpath : filename;
-	if (is_external_process(path_to_check)) {
-		DEBUG_PRINT("External process detected; cleaning environment\n");
-
-		env = create_cleaned_env(envp);
-		if (!env) {
-			DEBUG_PRINT("Error creating cleaned environment; using original env\n");
-			env = envp;
-		}
-	} else {
-		const char *basename = strrchr(filename, '/');
-		basename = basename ? basename + 1 : filename;
-		if (strcmp(basename, "xdg-open") == 0 || strcmp(basename, "gio-launch-desktop") == 0) {
-			DEBUG_PRINT("Internal process detected (%s); cleaning environment anyway since this is needed\n", basename);
+	if (envp) {
+		if (is_external_process(path_to_check)) {
+			DEBUG_PRINT("External process detected; cleaning environment\n");
 
 			env = create_cleaned_env(envp);
 			if (!env) {
 				DEBUG_PRINT("Error creating cleaned environment; using original env\n");
 				env = envp;
 			}
-		} else
-			DEBUG_PRINT("Internal process; leaving environment unchanged\n");
+		} else {
+			const char *basename = strrchr(filename, '/');
+			basename = basename ? basename + 1 : filename;
+			if (strcmp(basename, "xdg-open") == 0 || strcmp(basename, "gio-launch-desktop") == 0) {
+				DEBUG_PRINT("Internal process detected (%s); cleaning environment anyway since this is needed\n", basename);
+
+				env = create_cleaned_env(envp);
+				if (!env) {
+					DEBUG_PRINT("Error creating cleaned environment; using original env\n");
+					env = envp;
+				}
+			} else
+				DEBUG_PRINT("Internal process; leaving environment unchanged\n");
+		}
 	}
 
 	// Ensure PATH is always present at exec time. Process may have already cleared environ.
 	// glibc's execvpe(3) reads PATH via getenv() from the current process's environ,
 	// NOT from the envp parameter — so injecting into envp is not enough. We must also
 	// setenv() in the current process so that the fallback PATH search works correctly.
-	if (saved_appdir[0]) {
-		int has_path = 0;
+	// A NULL envp is an empty environment, so there is no envp to inject PATH into, but
+	// the parent still needs it for the execvpe lookup.
+	int has_path = 0;
+	if (env) {
 		for (size_t i = 0; env[i]; i++) {
 			if (strncmp(env[i], "PATH=", 5) == 0 && env[i][5] != '\0') {
 				has_path = 1;
 				break;
 			}
 		}
-		if (!has_path) {
-			char path_buf[sizeof(saved_appdir) + sizeof(saved_path) + 10];
-			snprintf(path_buf, sizeof(path_buf),
-				 "PATH=%s/bin:%s", saved_appdir,
-				 saved_path[0] ? saved_path : "/usr/bin:/bin");
+	}
+	if (!has_path && saved_appdir[0]) {
+		char path_buf[sizeof(saved_appdir) + sizeof(saved_path) + 10];
+		snprintf(path_buf, sizeof(path_buf),
+			 "PATH=%s/bin:%s", saved_appdir,
+			 saved_path[0] ? saved_path : "/usr/bin:/bin");
 
-			// Inject into envp array for execve(2) (which reads from envp)
+		// Inject into envp array for execve(2) (which reads from envp)
+		if (env) {
 			size_t count = 0;
 			while (env[count]) count++;
 
@@ -515,11 +513,11 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 					env_free(env);
 				env = (char* const *)new_env;
 			}
-
-			// Also set into environ so glibc's getenv("PATH") inside execvpe finds it
-			setenv("PATH", path_buf + 5, 1);
-			DEBUG_PRINT("Restored PATH to include APPDIR/bin\n");
 		}
+
+		// Also set into environ so glibc's getenv("PATH") inside execvpe finds it
+		setenv("PATH", path_buf + 5, 1);
+		DEBUG_PRINT("Restored PATH to include APPDIR/bin\n");
 	}
 
 	DEBUG_PRINT("Calling exec for %s\n", filename);
