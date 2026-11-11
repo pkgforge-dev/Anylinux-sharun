@@ -543,9 +543,11 @@ VISIBLE int execv(const char *filename, char *const argv[]) {
 	return execve(filename, argv, environ);
 }
 
-// build the argv array of the execl family from the varargs, ap is left
-// positioned right after the terminating NULL
-static char **collect_argv(const char *arg, va_list ap) {
+// build the argv array of the execl family from the varargs, if envp is not
+// NULL it receives the environment that follows the terminating NULL. It has
+// to be read here because va_list is passed by value on most ABIs and the
+// caller's copy is not advanced by this function.
+static char **collect_argv(const char *arg, va_list ap, char *const **envp) {
 	size_t count = 0;
 	va_list copy;
 
@@ -562,6 +564,8 @@ static char **collect_argv(const char *arg, va_list ap) {
 	for (const char *a = arg; a; a = va_arg(ap, char *))
 		argv[i++] = (char *)a;
 	argv[i] = NULL;
+	if (envp)
+		*envp = va_arg(ap, char *const *);
 	return argv;
 }
 
@@ -569,7 +573,7 @@ VISIBLE int execl(const char *path, const char *arg, ...) {
 	DEBUG_PRINT("execl call hijacked: %s\n", path);
 	va_list ap;
 	va_start(ap, arg);
-	char **argv = collect_argv(arg, ap);
+	char **argv = collect_argv(arg, ap, NULL);
 	va_end(ap);
 
 	if (!argv) {
@@ -588,14 +592,14 @@ VISIBLE int execle(const char *path, const char *arg, ...) {
 	DEBUG_PRINT("execle call hijacked: %s\n", path);
 	va_list ap;
 	va_start(ap, arg);
-	char **argv = collect_argv(arg, ap);
+	char *const *envp = NULL;
+	char **argv = collect_argv(arg, ap, &envp);
+	va_end(ap);
+
 	if (!argv) {
-		va_end(ap);
 		errno = ENOMEM;
 		return -1;
 	}
-	char *const *envp = va_arg(ap, char *const *);
-	va_end(ap);
 
 	int ret = execve(path, (char *const *)argv, envp);
 	int saved_errno = errno;
@@ -624,7 +628,7 @@ VISIBLE int execlp(const char *file, const char *arg, ...) {
 	DEBUG_PRINT("execlp call hijacked: %s\n", file);
 	va_list ap;
 	va_start(ap, arg);
-	char **argv = collect_argv(arg, ap);
+	char **argv = collect_argv(arg, ap, NULL);
 	va_end(ap);
 
 	if (!argv) {
