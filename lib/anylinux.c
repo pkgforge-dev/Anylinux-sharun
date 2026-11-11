@@ -273,6 +273,53 @@ static const char* vars_to_unset[] = {
 	NULL
 };
 
+static int replace_env_var(char **entry, const char *name, const char *value) {
+	size_t name_len = strlen(name);
+	if (strncmp(*entry, name, name_len) != 0 || (*entry)[name_len] != '=')
+		return 0;
+
+	size_t value_len = strlen(value);
+	char *new_entry = malloc(name_len + value_len + 2);
+	if (!new_entry)
+		return 0;
+
+	memcpy(new_entry, name, name_len);
+	new_entry[name_len] = '=';
+	memcpy(new_entry + name_len + 1, value, value_len + 1);
+
+	free(*entry);
+	*entry = new_entry;
+	DEBUG_PRINT("Restored %s to %s\n", name, value);
+	return 1;
+}
+
+static void restore_env_dirs(char **env) {
+	const char *data = getenv("REAL_XDG_DATA_HOME");
+	const char *config = getenv("REAL_XDG_CONFIG_HOME");
+	const char *cache = getenv("REAL_XDG_CACHE_HOME");
+	const char *home = getenv("REAL_HOME");
+
+	// we always set XDG_CACHE_HOME to a new location to prevent conflicts with
+	// the host cache, restore XDG_CACHE_HOME to the original value
+	const char *use_host_cache = getenv("USE_HOST_XDG_CACHE_HOME");
+	if (!use_host_cache || strcmp(use_host_cache, "1") != 0) {
+		const char *host_cache = getenv("HOST_XDG_CACHE_HOME");
+		if (host_cache && *host_cache)
+			cache = host_cache;
+	}
+
+	for (size_t i = 0; env[i]; i++) {
+		if (data && *data && replace_env_var(&env[i], "XDG_DATA_HOME", data))
+			continue;
+		if (config && *config && replace_env_var(&env[i], "XDG_CONFIG_HOME", config))
+			continue;
+		if (cache && *cache && replace_env_var(&env[i], "XDG_CACHE_HOME", cache))
+			continue;
+		if (home && *home && replace_env_var(&env[i], "HOME", home))
+			continue;
+	}
+}
+
 static char* const* create_cleaned_env(char* const* original_env) {
 	const char *appdir = getenv("APPDIR");
 	if (!appdir) {
@@ -318,6 +365,8 @@ static char* const* create_cleaned_env(char* const* original_env) {
 	}
 
 	new_env[new_env_index] = NULL;
+	// envp may not be environ, so restore the values directly in the child env
+	restore_env_dirs(new_env);
 	DEBUG_PRINT("Child environment has %zu variables (Parent %zu)\n", new_env_index, env_count);
 	return new_env;
 }
@@ -400,6 +449,9 @@ static int spawn_common(posix_spawn_func_t fn,
 	char *const *env = envp;
 	if (is_external_process(path_to_check)) {
 		DEBUG_PRINT("External process detected; cleaning environment\n");
+
+		restore_portable_dirs();
+
 		env = create_cleaned_env(envp);
 
 		if (!env) {
