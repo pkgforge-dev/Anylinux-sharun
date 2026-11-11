@@ -41,7 +41,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
-#include <sys/param.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -294,7 +293,7 @@ static int replace_env_var(char **entry, const char *name, const char *value) {
 	return 1;
 }
 
-static void restore_env_dirs(char **env, int use_setenv) {
+static void restore_env_dirs(char **env) {
 	const char *names[] = {
 		"XDG_DATA_HOME",
 		"XDG_CONFIG_HOME",
@@ -314,18 +313,6 @@ static void restore_env_dirs(char **env, int use_setenv) {
 	const char *host_cache = getenv("HOST_XDG_CACHE_HOME");
 	if (host_cache && *host_cache)
 		values[2] = host_cache;
-
-	if (use_setenv) {
-		for (size_t i = 0; i < count; i++) {
-			if (values[i] && *values[i]) {
-				if (setenv(names[i], values[i], 1) == 0)
-					DEBUG_PRINT("Restored %s to %s\n", names[i], values[i]);
-				else
-					DEBUG_PRINT("Failed to restore %s to %s\n", names[i], values[i]);
-			}
-		}
-		return;
-	}
 
 	for (size_t i = 0; env[i]; i++) {
 		for (size_t j = 0; j < count; j++) {
@@ -382,7 +369,7 @@ static char* const* create_cleaned_env(char* const* original_env) {
 
 	new_env[new_env_index] = NULL;
 	// envp may not be environ, so restore the values directly in the child env
-	restore_env_dirs(new_env, 0);
+	restore_env_dirs(new_env);
 	DEBUG_PRINT("Child environment has %zu variables (Parent %zu)\n", new_env_index, env_count);
 	return new_env;
 }
@@ -401,7 +388,12 @@ static int is_external_process(const char *filename) {
 		return 0;
 	}
 
-	int external = (strncmp(filename, appdir, MIN(strlen(filename), strlen(appdir))) != 0);
+	size_t appdir_len = strlen(appdir);
+	while (appdir_len > 1 && appdir[appdir_len - 1] == '/')
+		appdir_len--;
+
+	int external = strncmp(filename, appdir, appdir_len) != 0 ||
+	               (filename[appdir_len] != '\0' && filename[appdir_len] != '/');
 	DEBUG_PRINT("Process '%s' is %s (APPDIR=%s)\n", filename, external ? "EXTERNAL" : "INTERNAL", appdir);
 	return external;
 }
@@ -413,6 +405,15 @@ static int spawn_common(posix_spawn_func_t fn,
 						char *const argv[], char *const envp[])
 {
 	char *fullpath = canonicalize_file_name(path);
+
+	// posix_spawn(3) may be called with a NULL envp, which means an empty
+	// environment; there is nothing to clean in that case
+	if (!envp) {
+		int ret = fn(pid, path, file_actions, attrp, argv, NULL);
+		free(fullpath);
+		return ret;
+	}
+
 	const char *path_to_check = fullpath ? fullpath : path;
 
 	char *const *env = envp;
@@ -446,13 +447,19 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 	// troubleshooting with APPIMAGE_DEBUG=1
 	unsetenv("LD_DEBUG");
 
+	// execve(2) accepts a NULL envp as an empty environment. There is
+	// nothing to clean in that case and no PATH can be injected into it.
+	if (!envp) {
+		int ret = function(filename, argv, NULL);
+		if (fullpath && fullpath != filename) free(fullpath);
+		return ret;
+	}
+
 	// remove problematic variables
 	char* const *env = envp;
 	const char* path_to_check = fullpath ? fullpath : filename;
 	if (is_external_process(path_to_check)) {
 		DEBUG_PRINT("External process detected; cleaning environment\n");
-
-		restore_env_dirs(environ, 1);
 
 		env = create_cleaned_env(envp);
 		if (!env) {
@@ -464,8 +471,6 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 		basename = basename ? basename + 1 : filename;
 		if (strcmp(basename, "xdg-open") == 0 || strcmp(basename, "gio-launch-desktop") == 0) {
 			DEBUG_PRINT("Internal process detected (%s); cleaning environment anyway since this is needed\n", basename);
-
-			restore_env_dirs(environ, 1);
 
 			env = create_cleaned_env(envp);
 			if (!env) {
