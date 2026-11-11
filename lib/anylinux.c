@@ -437,7 +437,7 @@ static int spawn_common(posix_spawn_func_t fn,
 	return ret;
 }
 
-static int exec_common(execve_func_t function, const char *filename, char* const argv[], char* const envp[]) {
+static int exec_common(execve_func_t function, const char *filename, char* const argv[], char* const envp[], int explicit_env) {
 	DEBUG_PRINT("Preparing to exec: %s\n", filename);
 
 	char *fullpath = canonicalize_file_name(filename);
@@ -479,9 +479,10 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 	// glibc's execvpe(3) reads PATH via getenv() from the current process's environ,
 	// NOT from the envp parameter — so injecting into envp is not enough. We must also
 	// setenv() in the current process so that the fallback PATH search works correctly.
-	// A NULL envp means an empty environment. Build a minimal one with just PATH so
-	// wrappers in $APPDIR/bin (e.g. the ldconfig -p wrapper) still work, and set PATH
-	// in the parent as well for the execvpe lookup.
+	// A NULL envp passed explicitly to execve()/execvpe()/execle() is a request for an
+	// empty environment and is kept empty. For the environ-based wrappers (execv,
+	// execvp, execl, execlp), a NULL envp just means the process cleared environ, so
+	// the child gets a minimal environment with PATH for wrappers in $APPDIR/bin.
 	int has_path = 0;
 	if (env) {
 		for (size_t i = 0; env[i]; i++) {
@@ -514,7 +515,7 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 					env_free(env);
 				env = (char* const *)new_env;
 			}
-		} else {
+		} else if (!explicit_env) {
 			char **new_env = calloc(2, sizeof(char*));
 			if (new_env) {
 				new_env[0] = strdup(path_buf);
@@ -538,20 +539,24 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 	return ret;
 }
 
-VISIBLE int execve(const char *filename, char *const argv[], char *const envp[]) {
-	DEBUG_PRINT("execve call hijacked: %s\n", filename);
+static int execve_common(const char *filename, char *const argv[], char *const envp[], int explicit_env) {
 	execve_func_t execve_orig = dlsym(RTLD_NEXT, "execve");
 	if (!execve_orig) {
 		DEBUG_PRINT("Error getting original execve symbol: %s\n", dlerror());
 		errno = ENOSYS;
 		return -1;
 	}
-	return exec_common(execve_orig, filename, argv, envp);
+	return exec_common(execve_orig, filename, argv, envp, explicit_env);
+}
+
+VISIBLE int execve(const char *filename, char *const argv[], char *const envp[]) {
+	DEBUG_PRINT("execve call hijacked: %s\n", filename);
+	return execve_common(filename, argv, envp, 1);
 }
 
 VISIBLE int execv(const char *filename, char *const argv[]) {
 	DEBUG_PRINT("execv call hijacked: %s\n", filename);
-	return execve(filename, argv, environ);
+	return execve_common(filename, argv, environ, 0);
 }
 
 // build the argv array of the execl family from the varargs, if envp is not
@@ -619,20 +624,24 @@ VISIBLE int execle(const char *path, const char *arg, ...) {
 	return ret;
 }
 
-VISIBLE int execvpe(const char *filename, char *const argv[], char *const envp[]) {
-	DEBUG_PRINT("execvpe hijacked: %s\n", filename);
+static int execvpe_common(const char *filename, char *const argv[], char *const envp[], int explicit_env) {
 	execve_func_t execvpe_orig = dlsym(RTLD_NEXT, "execvpe");
 	if (!execvpe_orig) {
 		DEBUG_PRINT("Error getting original execvpe symbol: %s\n", dlerror());
 		errno = ENOSYS;
 		return -1;
 	}
-	return exec_common(execvpe_orig, filename, argv, envp);
+	return exec_common(execvpe_orig, filename, argv, envp, explicit_env);
+}
+
+VISIBLE int execvpe(const char *filename, char *const argv[], char *const envp[]) {
+	DEBUG_PRINT("execvpe hijacked: %s\n", filename);
+	return execvpe_common(filename, argv, envp, 1);
 }
 
 VISIBLE int execvp(const char *filename, char *const argv[]) {
 	DEBUG_PRINT("execvp hijacked: %s\n", filename);
-	return execvpe(filename, argv, environ);
+	return execvpe_common(filename, argv, environ, 0);
 }
 
 VISIBLE int execlp(const char *file, const char *arg, ...) {
