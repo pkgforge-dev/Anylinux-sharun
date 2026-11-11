@@ -41,7 +41,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/auxv.h>
-#include <sys/param.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -294,7 +293,7 @@ static int replace_env_var(char **entry, const char *name, const char *value) {
 	return 1;
 }
 
-static void restore_env_dirs(char **env, int use_setenv) {
+static void restore_env_dirs(char **env) {
 	const char *names[] = {
 		"XDG_DATA_HOME",
 		"XDG_CONFIG_HOME",
@@ -315,18 +314,6 @@ static void restore_env_dirs(char **env, int use_setenv) {
 	if (host_cache && *host_cache)
 		values[2] = host_cache;
 
-	if (use_setenv) {
-		for (size_t i = 0; i < count; i++) {
-			if (values[i] && *values[i]) {
-				if (setenv(names[i], values[i], 1) == 0)
-					DEBUG_PRINT("Restored %s to %s\n", names[i], values[i]);
-				else
-					DEBUG_PRINT("Failed to restore %s to %s\n", names[i], values[i]);
-			}
-		}
-		return;
-	}
-
 	for (size_t i = 0; env[i]; i++) {
 		for (size_t j = 0; j < count; j++) {
 			if (values[j] && *values[j] &&
@@ -338,8 +325,8 @@ static void restore_env_dirs(char **env, int use_setenv) {
 
 static char* const* create_cleaned_env(char* const* original_env) {
 	const char *appdir = getenv("APPDIR");
-	if (!appdir) {
-		DEBUG_PRINT("APPDIR is NOT set!\n");
+	if (!appdir || !*appdir) {
+		DEBUG_PRINT("APPDIR is empty or NOT set!\n");
 		return original_env;
 	}
 	DEBUG_PRINT("APPDIR is set: %s\n", appdir);
@@ -382,7 +369,7 @@ static char* const* create_cleaned_env(char* const* original_env) {
 
 	new_env[new_env_index] = NULL;
 	// envp may not be environ, so restore the values directly in the child env
-	restore_env_dirs(new_env, 0);
+	restore_env_dirs(new_env);
 	DEBUG_PRINT("Child environment has %zu variables (Parent %zu)\n", new_env_index, env_count);
 	return new_env;
 }
@@ -396,12 +383,17 @@ static void env_free(char* const *env) {
 
 static int is_external_process(const char *filename) {
 	const char *appdir = getenv("APPDIR");
-	if (!appdir) {
-		DEBUG_PRINT("APPDIR not set; treating %s as internal process\n", filename);
+	if (!appdir || !*appdir) {
+		DEBUG_PRINT("APPDIR is empty or not set; treating %s as internal process\n", filename);
 		return 0;
 	}
 
-	int external = (strncmp(filename, appdir, MIN(strlen(filename), strlen(appdir))) != 0);
+	size_t appdir_len = strlen(appdir);
+	while (appdir_len > 1 && appdir[appdir_len - 1] == '/')
+		appdir_len--;
+
+	int external = strncmp(filename, appdir, appdir_len) != 0 ||
+	               (filename[appdir_len] != '\0' && filename[appdir_len] != '/');
 	DEBUG_PRINT("Process '%s' is %s (APPDIR=%s)\n", filename, external ? "EXTERNAL" : "INTERNAL", appdir);
 	return external;
 }
@@ -413,6 +405,15 @@ static int spawn_common(posix_spawn_func_t fn,
 						char *const argv[], char *const envp[])
 {
 	char *fullpath = canonicalize_file_name(path);
+
+	// posix_spawn(3) may be called with a NULL envp, which means an empty
+	// environment; there is nothing to clean in that case
+	if (!envp) {
+		int ret = fn(pid, path, file_actions, attrp, argv, NULL);
+		free(fullpath);
+		return ret;
+	}
+
 	const char *path_to_check = fullpath ? fullpath : path;
 
 	char *const *env = envp;
@@ -436,7 +437,7 @@ static int spawn_common(posix_spawn_func_t fn,
 	return ret;
 }
 
-static int exec_common(execve_func_t function, const char *filename, char* const argv[], char* const envp[]) {
+static int exec_common(execve_func_t function, const char *filename, char* const argv[], char* const envp[], int explicit_env) {
 	DEBUG_PRINT("Preparing to exec: %s\n", filename);
 
 	char *fullpath = canonicalize_file_name(filename);
@@ -449,52 +450,56 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 	// remove problematic variables
 	char* const *env = envp;
 	const char* path_to_check = fullpath ? fullpath : filename;
-	if (is_external_process(path_to_check)) {
-		DEBUG_PRINT("External process detected; cleaning environment\n");
-
-		restore_env_dirs(environ, 1);
-
-		env = create_cleaned_env(envp);
-		if (!env) {
-			DEBUG_PRINT("Error creating cleaned environment; using original env\n");
-			env = envp;
-		}
-	} else {
-		const char *basename = strrchr(filename, '/');
-		basename = basename ? basename + 1 : filename;
-		if (strcmp(basename, "xdg-open") == 0 || strcmp(basename, "gio-launch-desktop") == 0) {
-			DEBUG_PRINT("Internal process detected (%s); cleaning environment anyway since this is needed\n", basename);
-
-			restore_env_dirs(environ, 1);
+	if (envp) {
+		if (is_external_process(path_to_check)) {
+			DEBUG_PRINT("External process detected; cleaning environment\n");
 
 			env = create_cleaned_env(envp);
 			if (!env) {
 				DEBUG_PRINT("Error creating cleaned environment; using original env\n");
 				env = envp;
 			}
-		} else
-			DEBUG_PRINT("Internal process; leaving environment unchanged\n");
+		} else {
+			const char *basename = strrchr(filename, '/');
+			basename = basename ? basename + 1 : filename;
+			if (strcmp(basename, "xdg-open") == 0 || strcmp(basename, "gio-launch-desktop") == 0) {
+				DEBUG_PRINT("Internal process detected (%s); cleaning environment anyway since this is needed\n", basename);
+
+				env = create_cleaned_env(envp);
+				if (!env) {
+					DEBUG_PRINT("Error creating cleaned environment; using original env\n");
+					env = envp;
+				}
+			} else
+				DEBUG_PRINT("Internal process; leaving environment unchanged\n");
+		}
 	}
 
 	// Ensure PATH is always present at exec time. Process may have already cleared environ.
 	// glibc's execvpe(3) reads PATH via getenv() from the current process's environ,
 	// NOT from the envp parameter — so injecting into envp is not enough. We must also
 	// setenv() in the current process so that the fallback PATH search works correctly.
-	if (saved_appdir[0]) {
-		int has_path = 0;
+	// A NULL envp passed explicitly to execve()/execvpe()/execle() is a request for an
+	// empty environment and is kept empty. For the environ-based wrappers (execv,
+	// execvp, execl, execlp), a NULL envp just means the process cleared environ, so
+	// the child gets a minimal environment with PATH for wrappers in $APPDIR/bin.
+	int has_path = 0;
+	if (env) {
 		for (size_t i = 0; env[i]; i++) {
 			if (strncmp(env[i], "PATH=", 5) == 0 && env[i][5] != '\0') {
 				has_path = 1;
 				break;
 			}
 		}
-		if (!has_path) {
-			char path_buf[sizeof(saved_appdir) + sizeof(saved_path) + 10];
-			snprintf(path_buf, sizeof(path_buf),
-				 "PATH=%s/bin:%s", saved_appdir,
-				 saved_path[0] ? saved_path : "/usr/bin:/bin");
+	}
+	if (!has_path && saved_appdir[0]) {
+		char path_buf[sizeof(saved_appdir) + sizeof(saved_path) + 10];
+		snprintf(path_buf, sizeof(path_buf),
+			 "PATH=%s/bin:%s", saved_appdir,
+			 saved_path[0] ? saved_path : "/usr/bin:/bin");
 
-			// Inject into envp array for execve(2) (which reads from envp)
+		// Inject into envp array for execve(2) (which reads from envp)
+		if (env) {
 			size_t count = 0;
 			while (env[count]) count++;
 
@@ -510,11 +515,18 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 					env_free(env);
 				env = (char* const *)new_env;
 			}
-
-			// Also set into environ so glibc's getenv("PATH") inside execvpe finds it
-			setenv("PATH", path_buf + 5, 1);
-			DEBUG_PRINT("Restored PATH to include APPDIR/bin\n");
+		} else if (!explicit_env) {
+			char **new_env = calloc(2, sizeof(char*));
+			if (new_env) {
+				new_env[0] = strdup(path_buf);
+				new_env[1] = NULL;
+				env = (char* const *)new_env;
+			}
 		}
+
+		// Also set into environ so glibc's getenv("PATH") inside execvpe finds it
+		setenv("PATH", path_buf + 5, 1);
+		DEBUG_PRINT("Restored PATH to include APPDIR/bin\n");
 	}
 
 	DEBUG_PRINT("Calling exec for %s\n", filename);
@@ -527,20 +539,24 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 	return ret;
 }
 
-VISIBLE int execve(const char *filename, char *const argv[], char *const envp[]) {
-	DEBUG_PRINT("execve call hijacked: %s\n", filename);
+static int execve_common(const char *filename, char *const argv[], char *const envp[], int explicit_env) {
 	execve_func_t execve_orig = dlsym(RTLD_NEXT, "execve");
 	if (!execve_orig) {
 		DEBUG_PRINT("Error getting original execve symbol: %s\n", dlerror());
 		errno = ENOSYS;
 		return -1;
 	}
-	return exec_common(execve_orig, filename, argv, envp);
+	return exec_common(execve_orig, filename, argv, envp, explicit_env);
+}
+
+VISIBLE int execve(const char *filename, char *const argv[], char *const envp[]) {
+	DEBUG_PRINT("execve call hijacked: %s\n", filename);
+	return execve_common(filename, argv, envp, 1);
 }
 
 VISIBLE int execv(const char *filename, char *const argv[]) {
 	DEBUG_PRINT("execv call hijacked: %s\n", filename);
-	return execve(filename, argv, environ);
+	return execve_common(filename, argv, environ, 0);
 }
 
 // build the argv array of the execl family from the varargs, if envp is not
@@ -608,20 +624,24 @@ VISIBLE int execle(const char *path, const char *arg, ...) {
 	return ret;
 }
 
-VISIBLE int execvpe(const char *filename, char *const argv[], char *const envp[]) {
-	DEBUG_PRINT("execvpe hijacked: %s\n", filename);
+static int execvpe_common(const char *filename, char *const argv[], char *const envp[], int explicit_env) {
 	execve_func_t execvpe_orig = dlsym(RTLD_NEXT, "execvpe");
 	if (!execvpe_orig) {
 		DEBUG_PRINT("Error getting original execvpe symbol: %s\n", dlerror());
 		errno = ENOSYS;
 		return -1;
 	}
-	return exec_common(execvpe_orig, filename, argv, envp);
+	return exec_common(execvpe_orig, filename, argv, envp, explicit_env);
+}
+
+VISIBLE int execvpe(const char *filename, char *const argv[], char *const envp[]) {
+	DEBUG_PRINT("execvpe hijacked: %s\n", filename);
+	return execvpe_common(filename, argv, envp, 1);
 }
 
 VISIBLE int execvp(const char *filename, char *const argv[]) {
 	DEBUG_PRINT("execvp hijacked: %s\n", filename);
-	return execvpe(filename, argv, environ);
+	return execvpe_common(filename, argv, environ, 0);
 }
 
 VISIBLE int execlp(const char *file, const char *arg, ...) {
