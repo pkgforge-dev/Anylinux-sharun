@@ -273,6 +273,68 @@ static const char* vars_to_unset[] = {
 	NULL
 };
 
+static int replace_env_var(char **entry, const char *name, const char *value) {
+	size_t name_len = strlen(name);
+	if (strncmp(*entry, name, name_len) != 0 || (*entry)[name_len] != '=')
+		return 0;
+
+	size_t value_len = strlen(value);
+	char *new_entry = malloc(name_len + value_len + 2);
+	if (!new_entry)
+		return 0;
+
+	memcpy(new_entry, name, name_len);
+	new_entry[name_len] = '=';
+	memcpy(new_entry + name_len + 1, value, value_len + 1);
+
+	free(*entry);
+	*entry = new_entry;
+	DEBUG_PRINT("Restored %s to %s\n", name, value);
+	return 1;
+}
+
+static void restore_env_dirs(char **env, int use_setenv) {
+	const char *names[] = {
+		"XDG_DATA_HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_CACHE_HOME",
+		"HOME",
+	};
+	const char *values[] = {
+		getenv("REAL_XDG_DATA_HOME"),
+		getenv("REAL_XDG_CONFIG_HOME"),
+		getenv("REAL_XDG_CACHE_HOME"),
+		getenv("REAL_HOME"),
+	};
+	size_t count = sizeof(names) / sizeof(names[0]);
+
+	// AppRun.lib sets XDG_CACHE_HOME to a dedicated location. HOST_XDG_CACHE_HOME
+	// is the value from before that, which is what child processes should use.
+	const char *host_cache = getenv("HOST_XDG_CACHE_HOME");
+	if (host_cache && *host_cache)
+		values[2] = host_cache;
+
+	if (use_setenv) {
+		for (size_t i = 0; i < count; i++) {
+			if (values[i] && *values[i]) {
+				if (setenv(names[i], values[i], 1) == 0)
+					DEBUG_PRINT("Restored %s to %s\n", names[i], values[i]);
+				else
+					DEBUG_PRINT("Failed to restore %s to %s\n", names[i], values[i]);
+			}
+		}
+		return;
+	}
+
+	for (size_t i = 0; env[i]; i++) {
+		for (size_t j = 0; j < count; j++) {
+			if (values[j] && *values[j] &&
+			    replace_env_var(&env[i], names[j], values[j]))
+				break;
+		}
+	}
+}
+
 static char* const* create_cleaned_env(char* const* original_env) {
 	const char *appdir = getenv("APPDIR");
 	if (!appdir) {
@@ -318,6 +380,8 @@ static char* const* create_cleaned_env(char* const* original_env) {
 	}
 
 	new_env[new_env_index] = NULL;
+	// envp may not be environ, so restore the values directly in the child env
+	restore_env_dirs(new_env, 0);
 	DEBUG_PRINT("Child environment has %zu variables (Parent %zu)\n", new_env_index, env_count);
 	return new_env;
 }
@@ -341,53 +405,6 @@ static int is_external_process(const char *filename) {
 	return external;
 }
 
-static void restore_portable_dirs(void) {
-	const char *real_data = getenv("REAL_XDG_DATA_HOME");
-	if (real_data && *real_data) {
-		if (setenv("XDG_DATA_HOME", real_data, 1) == 0)
-			DEBUG_PRINT("Restored XDG_DATA_HOME to %s\n", real_data);
-		else
-			DEBUG_PRINT("Failed to restore XDG_DATA_HOME to %s\n", real_data);
-	}
-
-	const char *real_config = getenv("REAL_XDG_CONFIG_HOME");
-	if (real_config && *real_config) {
-		if (setenv("XDG_CONFIG_HOME", real_config, 1) == 0)
-			DEBUG_PRINT("Restored XDG_CONFIG_HOME to %s\n", real_config);
-		else
-			DEBUG_PRINT("Failed to restore XDG_CONFIG_HOME to %s\n", real_config);
-	}
-
-	const char *real_cache = getenv("REAL_XDG_CACHE_HOME");
-	if (real_cache && *real_cache) {
-		if (setenv("XDG_CACHE_HOME", real_cache, 1) == 0)
-			DEBUG_PRINT("Restored XDG_CACHE_HOME to %s\n", real_cache);
-		else
-			DEBUG_PRINT("Failed to restore XDG_CACHE_HOME to %s\n", real_cache);
-	}
-
-	// we always set XDG_CACHE_HOME to a new location to prevent conflicts with
-	// the host cache, restore XDG_CACHE_HOME to the original value
-	const char *use_host_cache = getenv("USE_HOST_XDG_CACHE_HOME");
-	if (!use_host_cache || strcmp(use_host_cache, "1") != 0) {
-		const char *host_cache = getenv("HOST_XDG_CACHE_HOME");
-		if (host_cache && *host_cache) {
-			if (setenv("XDG_CACHE_HOME", host_cache, 1) == 0)
-				DEBUG_PRINT("Restored XDG_CACHE_HOME to %s (from HOST_XDG_CACHE_HOME)\n", host_cache);
-			else
-				DEBUG_PRINT("Failed to restore XDG_CACHE_HOME to %s (from HOST_XDG_CACHE_HOME)\n", host_cache);
-		}
-	}
-
-	const char *real_home = getenv("REAL_HOME");
-	if (real_home && *real_home) {
-		if (setenv("HOME", real_home, 1) == 0)
-			DEBUG_PRINT("Restored HOME to %s\n", real_home);
-		else
-			DEBUG_PRINT("Failed to restore HOME to %s\n", real_home);
-	}
-}
-
 static int spawn_common(posix_spawn_func_t fn,
 						const char *path, pid_t *pid,
 						const posix_spawn_file_actions_t *file_actions,
@@ -400,6 +417,7 @@ static int spawn_common(posix_spawn_func_t fn,
 	char *const *env = envp;
 	if (is_external_process(path_to_check)) {
 		DEBUG_PRINT("External process detected; cleaning environment\n");
+
 		env = create_cleaned_env(envp);
 
 		if (!env) {
@@ -433,7 +451,7 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 	if (is_external_process(path_to_check)) {
 		DEBUG_PRINT("External process detected; cleaning environment\n");
 
-		restore_portable_dirs();
+		restore_env_dirs(environ, 1);
 
 		env = create_cleaned_env(envp);
 		if (!env) {
@@ -446,7 +464,7 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 		if (strcmp(basename, "xdg-open") == 0 || strcmp(basename, "gio-launch-desktop") == 0) {
 			DEBUG_PRINT("Internal process detected (%s); cleaning environment anyway since this is needed\n", basename);
 
-			restore_portable_dirs();
+			restore_env_dirs(environ, 1);
 
 			env = create_cleaned_env(envp);
 			if (!env) {
