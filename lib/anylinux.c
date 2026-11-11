@@ -479,8 +479,9 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 	// glibc's execvpe(3) reads PATH via getenv() from the current process's environ,
 	// NOT from the envp parameter — so injecting into envp is not enough. We must also
 	// setenv() in the current process so that the fallback PATH search works correctly.
-	// A NULL envp is an empty environment, so there is no envp to inject PATH into, but
-	// the parent still needs it for the execvpe lookup.
+	// A NULL envp means an empty environment. Build a minimal one with just PATH so
+	// wrappers in $APPDIR/bin (e.g. the ldconfig -p wrapper) still work, and set PATH
+	// in the parent as well for the execvpe lookup.
 	int has_path = 0;
 	if (env) {
 		for (size_t i = 0; env[i]; i++) {
@@ -511,6 +512,13 @@ static int exec_common(execve_func_t function, const char *filename, char* const
 
 				if (env != envp)
 					env_free(env);
+				env = (char* const *)new_env;
+			}
+		} else {
+			char **new_env = calloc(2, sizeof(char*));
+			if (new_env) {
+				new_env[0] = strdup(path_buf);
+				new_env[1] = NULL;
 				env = (char* const *)new_env;
 			}
 		}
