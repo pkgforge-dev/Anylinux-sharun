@@ -51,10 +51,12 @@ This fork is used by the [Anylinux-AppImages](https://github.com/pkgforge-dev/An
   - `glycin-fix.so` - disables the bwrap sandbox of GNOME's glycin image loader, which never works inside an AppImage because glycin incorrectly binds AppImage paths to bwrap, resulting in crashes. Only intended for applications that ship real glycin (`libglycin-*`), quick-sharun preloads it only for those, there is nothing to fix in [glycin-ng](https://github.com/QaidVoid/glycin-ng) based applications since it has a working sandbox. Glycin is only reached via `dlsym`/`dlopen(RTLD_NOLOAD)`, so the library does not affect applications that do not make use of glycin at all. Note that with the library preloaded `dlsym(RTLD_DEFAULT, "gly_loader_new")` returns a non-NULL wrapper even before glycin is loaded in, callers must check the returned loader for NULL.
   - `path-mapping.so` - vendored from [pathmap](https://github.com/VHSgunzo/pathmap), only the preload library, the standalone tracer binary is not built. Maps hardcoded paths at runtime with `PATH_MAPPING`/`PATHMAP_*` env variables, sharun only preloads it when `PATH_MAPPING` is set and it replaces the git clone + C compiler build that deployments used to carry out.
 
+  The `stubs/` subdirectory holds two dummy libraries that are not preloaded: `libsystemd.so.0` and `libsndfile.so.1`. They export the complete ABI of the real libraries but answer with safe "not available" values, so applications that only get them transitively through `libpulse`/`libdbus` do not need to ship systemd or the libsndfile codec chain. See [`lib/stubs/README.md`](lib/stubs/README.md) for what is implemented and how the manifests are generated. `quick-sharun` decides per application whether to use them and deletes the directory otherwise.
+
   Each release contains, per architecture:
 
   - `sharun-$ARCH` - the sharun binary.
-  - `sharun+helper-libs-$ARCH.tar` - sharun plus the prebuilt libraries in a single flat tar (`sharun`, `anylinux.so`, `gtk-fix-nonsense.so`, `glycin-fix.so`, `path-mapping.so`), so consumers get everything with one download and no C compiler is needed on the build host.
+  - `sharun+helper-libs-$ARCH.tar` - sharun plus the prebuilt libraries in a single tar (`sharun`, `anylinux.so`, `gtk-fix-nonsense.so`, `glycin-fix.so`, `path-mapping.so`, and the `stubs/` directory), so consumers get everything with one download and no C compiler is needed on the build host.
   - A `.sha256` checksum file for each of the released assets.
 
 ## What this fork removes

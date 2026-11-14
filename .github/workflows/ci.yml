@@ -8,8 +8,37 @@ env:
   ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
 
 jobs:
+  manifests:
+    name: Stub manifests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The manifest generator needs the real libraries and public headers,
+      # so run it in a current Arch container. The resulting manifests are
+      # passed to the build job as an artifact; they are not committed.
+      - name: Generate manifests in Arch
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src archlinux:latest sh -ec '
+            pacman -Syu --noconfirm --needed \
+              make systemd libsndfile gcc binutils gawk sed grep coreutils
+            make -C lib/stubs manifests
+          '
+          sudo chown -R "$(id -u):$(id -g)" lib/stubs
+
+      - name: Package manifests
+        run: tar -C lib/stubs -cf stub-manifests.tar systemd/symbols.tsv sndfile/symbols.tsv
+
+      - name: Upload manifests
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stub-manifests
+          path: stub-manifests.tar
+
   build:
     name: sharun-${{ matrix.arch }}
+    needs: manifests
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -54,6 +83,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download stub manifests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: stub-manifests
+
+      - name: Extract stub manifests
+        run: tar -C lib/stubs -xf stub-manifests.tar
 
       - name: Setup toolchain
         uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
@@ -145,6 +182,12 @@ jobs:
           export ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
           make -C lib CC="$RUNNER_TEMP/zig/zig cc -target ${{ matrix.glibctarget }}" LDFLAGS=-s
 
+      - name: Build stubs
+        run: |
+          export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
+          export ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-cache"
+          make -C lib/stubs CC="$RUNNER_TEMP/zig/zig cc -target ${{ matrix.glibctarget }}" LDFLAGS=-s
+
       - name: Verify libs
         run: |
           floor="GLIBC_${{ matrix.glibc }}"
@@ -189,10 +232,27 @@ jobs:
             fi
           done
 
+      - name: Verify stubs
+        run: |
+          for so in lib/stubs/out/*.so*; do
+            echo "== $so"
+            readelf -d "$so" | grep -E 'SONAME|NEEDED' || :
+            if readelf -d "$so" | grep -q NEEDED; then
+              echo "ERROR: $so has DT_NEEDED entries" >&2
+              exit 1
+            fi
+            if objdump -T "$so" | grep -q 'GLIBC_'; then
+              echo "ERROR: $so references GLIBC symbols" >&2
+              exit 1
+            fi
+          done
+          make -C lib/stubs check
+
       # Single tar with sharun + the libs so consumers (quick-sharun) can
       # grab everything in one download without building on the host.
-      # Flat layout on purpose, no nested directory and no leading ./
-      # Files inside carry no arch, the tar name already has it
+      # Flat layout is kept for the helper libs, the only exception is the
+      # stubs/ directory, which holds the dummy libsystemd and libsndfile.
+      # Files inside carry no arch, the tar name already has it.
       #
       # dash is BSD-3-Clause, which asks for the notice to travel with binary
       # redistribution, so it goes in the tar next to the binary. The name
@@ -204,11 +264,13 @@ jobs:
           cp "dash-${{ matrix.arch }}" pkg/dash
           cp licenses/dash-COPYING pkg/dash-COPYING
           cp lib/*.so pkg/
+          mkdir -p pkg/stubs
+          cp lib/stubs/out/*.so* pkg/stubs/
           tar_name="sharun+helper-libs-${{ matrix.arch }}.tar"
           ( cd pkg && tar -cf "../$tar_name" -- * )
           rm -rf pkg
-          if tar -tf "$tar_name" | grep -q '/'; then
-            echo "ERROR: tar contains nested paths" >&2
+          if tar -tf "$tar_name" | grep -v '^stubs/' | grep -q '/'; then
+            echo "ERROR: tar contains nested paths outside stubs/" >&2
             exit 1
           fi
           tar -tvf "$tar_name"

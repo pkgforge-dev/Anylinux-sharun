@@ -1,0 +1,13 @@
+# symbols implemented by hand in overrides.c
+sf_close
+sf_command
+sf_current_byterate
+sf_error
+sf_error_number
+sf_error_str
+sf_format_check
+sf_perror
+sf_seek
+sf_set_string
+sf_strerror
+sf_version_string
