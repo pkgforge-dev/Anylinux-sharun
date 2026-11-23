@@ -434,13 +434,37 @@ fn needs_compat() -> bool {
 /// Run `apprun::run_as_apprun` for `(sharun_dir, bin_dir, exec_args)` under the
 /// tracer. Never returns.
 pub fn run_apprun_traced(sharun_dir: &str, bin_dir: &str, exec_args: &[String]) -> ! {
+	run_traced(&|| crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args))
+}
+
+/// Run an arbitrary command under the tracer, as `run_apprun_traced` does for
+/// an AppDir. This is for things that run before any AppDir exists, such as an
+/// AppImage runtime extracting its image on a kernel without the `*at`
+/// syscalls. Never returns; `args[0]` is looked up in `PATH`.
+pub fn run_command_traced(args: &[String]) -> ! {
+	let launch = || {
+		let err = std::os::unix::process::CommandExt::exec(
+			std::process::Command::new(&args[0]).args(&args[1..]),
+		);
+		eprintln!("[sharun] failed to execute {}: {err}", args[0]);
+		exit(127)
+	};
+	if !enabled() {
+		launch()
+	}
+	run_traced(&launch)
+}
+
+/// Fork, trace the child and let it call `launch`, which must not return.
+fn run_traced(launch: &dyn Fn()) -> ! {
 	// If ptrace is blocked (e.g. a container's seccomp policy), don't turn a
 	// runnable app into a failure: run it untraced, exactly as if this layer
 	// were disabled. On a genuinely ancient kernel glibc dies on its own, which
 	// is no worse than running without the feature.
 	if !ptrace_permitted() {
 		eprintln!("[sharun] ptrace unavailable, running without old kernel compatibility");
-		crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args);
+		launch();
+		exit(1)
 	}
 
 	// Prime the no_new_privs/execve probe in this (untraced) parent, so the
@@ -462,7 +486,7 @@ pub fn run_apprun_traced(sharun_dir: &str, bin_dir: &str, exec_args: &[String]) 
 				if have_pipe {
 					unsafe { libc::close(pipe_fds[1]) };
 				}
-				crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args)
+				{ launch(); exit(1) }
 			}
 			let seccomp = install_seccomp_filter();
 			if have_pipe {
@@ -474,7 +498,7 @@ pub fn run_apprun_traced(sharun_dir: &str, bin_dir: &str, exec_args: &[String]) 
 			}
 			// Let the parent install PTRACE_SETOPTIONS before we run.
 			let _ = raise(Signal::SIGSTOP);
-			crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args)
+			{ launch(); exit(1) }
 		},
 		Ok(ForkResult::Parent { child }) => {
 			let mut use_seccomp = false;
@@ -491,7 +515,7 @@ pub fn run_apprun_traced(sharun_dir: &str, bin_dir: &str, exec_args: &[String]) 
 			supervise(child, use_seccomp)
 		},
 		// Could not fork the tracer: run untraced rather than fail.
-		Err(_) => crate::apprun::run_as_apprun(sharun_dir, bin_dir, exec_args),
+		Err(_) => { launch(); exit(1) },
 	}
 }
 

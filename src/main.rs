@@ -141,6 +141,20 @@ fn main() {
 					print_usage();
 					return
 				}
+				// The no_new_privs probe re-execs this binary under the name it was
+				// started with, which for --compat-exec is not AppRun
+				SHARUN_NNP_PROBE_FLAG => exit(0),
+				"--compat-exec" => {
+					// Run a command under the old kernel compatibility layer,
+					// for what has to run before an AppDir exists (an AppImage
+					// runtime extracting itself on a kernel without *at)
+					#[cfg(target_arch = "x86_64")]
+					if exec_args.len() > 1 {
+						kernel_compat::run_command_traced(&exec_args[1..]);
+					}
+					eprintln!("Usage: sharun --compat-exec CMD [ARGS...] (x86_64 only)");
+					exit(1)
+				}
 				"-g" | "--gen-lib-path" => {
 					for library_path in [lib, lib32] {
 						if Path::new(&library_path).exists() {
