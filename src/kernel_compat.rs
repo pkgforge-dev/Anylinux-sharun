@@ -201,6 +201,42 @@ fn prlimit64_missing() -> bool {
 	})
 }
 
+// The *at family (openat and friends) arrived in 2.6.16.
+const AT_FDCWD: i32 = -100;
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+const AT_REMOVEDIR: u64 = 0x200;
+const AT_EMPTY_PATH: u64 = 0x1000;
+/// Longest path the translations copy: what the kernel accepts, plus its NUL.
+const PATH_MAX: usize = 4096;
+
+/// Probe once whether the kernel has the *at syscalls (2.6.16): everything a
+/// modern libc opens, stats or unlinks goes through them, so on 2.6.15 and
+/// older not even the dynamic loader can open a library.
+pub(crate) fn at_missing() -> bool {
+	static MISSING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*MISSING.get_or_init(|| {
+		let path = b"/\0";
+		let rc = unsafe {
+			libc::syscall(libc::SYS_openat, AT_FDCWD, path.as_ptr(), libc::O_RDONLY, 0)
+		};
+		let missing = not_implemented(libc::SYS_openat, rc);
+		if !missing && rc >= 0 {
+			unsafe { libc::close(rc as i32) };
+		}
+		missing
+	})
+}
+
+fn is_at_call(nr: u64) -> bool {
+	[
+		libc::SYS_openat, libc::SYS_mkdirat, libc::SYS_mknodat, libc::SYS_fchownat,
+		libc::SYS_futimesat, libc::SYS_newfstatat, libc::SYS_unlinkat, libc::SYS_renameat,
+		libc::SYS_linkat, libc::SYS_symlinkat, libc::SYS_readlinkat, libc::SYS_fchmodat,
+		libc::SYS_faccessat,
+	]
+	.contains(&(nr as libc::c_long))
+}
+
 /// Probe once whether the kernel implements pipe2(2) (added in 2.6.27). Only
 /// then is pipe2 emulated: `emulated_syscalls` makes the pipe and applies
 /// O_NONBLOCK/O_CLOEXEC itself; the plain rewrite to pipe, which loses both, is
@@ -952,6 +988,9 @@ impl Tracer {
 			// stop so on_syscall_exit can restore rsp.
 			return Some(translate_futex(pid, regs, &mut self.reserved));
 		}
+		if is_at_call(regs.orig_rax) && at_missing() {
+			return Some(self.translate_at(pid, regs));
+		}
 		if regs.orig_rax == libc::SYS_pipe2 as u64 && pipe2_missing() {
 			// pipe2 (2.6.27) -> pipe (ancient). Fallback only: the flags are
 			// lost, so callers that relied on pipe2 to set O_NONBLOCK or
@@ -1217,7 +1256,15 @@ impl Tracer {
 		// returning fd 291, `openat2` 437 returning fd 437 -- into ENOSYS on
 		// every kernel that implements those calls.
 		if let Some(nr) = self.last_syscall.get(&pid).copied() {
-			const ABOVE_TABLE: u64 = 279;
+			// Highest syscall number each kernel has: 2.6.15 stops at 255
+			// (inotify_rm_watch), 2.6.16 at 272 (unshare), 2.6.17 at 278.
+			let above_table: u64 = if kernel_lt(2, 6, 16) {
+				255
+			} else if kernel_lt(2, 6, 17) {
+				272
+			} else {
+				279
+			};
 			// Only an *untranslated* call can be echoing: a number the kernel
 			// really does not have is passed through untouched, whereas a
 			// rewritten one executes a different syscall whose result is its own
@@ -1226,7 +1273,7 @@ impl Tracer {
 			// buffer). 64-bit tracees only: the i386 entry path returns a real
 			// -ENOSYS, and numbers this high are ordinary syscalls there.
 			let echoed = regs.cs == 0x33
-				&& nr > ABOVE_TABLE
+				&& nr > above_table
 				&& kernel_echoes_number()
 				&& regs.orig_rax == nr;
 			// `synthesized` is the count this layer just wrote into rax: a request
@@ -1253,6 +1300,125 @@ impl Tracer {
 		// the slot (e.g. a statx exit after a getrandom exit) could re-enter
 		// the getrandom branch with the wrong registers.
 		self.last_syscall.remove(&pid);
+	}
+
+	/// The *at family (2.6.16) -> the plain call, for kernels that predate it.
+	/// With the working directory or an absolute path that is only a register
+	/// shuffle; with a directory fd and a relative path the path is rebuilt
+	/// through /proc/self/fd (see `resolve_at_path`). Returns whether the
+	/// syscall-exit stop is needed, which is when scratch memory was used and
+	/// the stack pointer has to be put back.
+	fn translate_at(&mut self, pid: Pid, regs: libc::user_regs_struct) -> bool {
+		let nr = regs.orig_rax as libc::c_long;
+		let saved_rsp = regs.rsp;
+		let top = saved_rsp.wrapping_sub(512) & !0xf;
+		let mut low = top;
+		let mut p = regs;
+		// Resolve (dirfd, path). A path that cannot be read or rebuilt becomes
+		// NULL, so the plain call fails with EFAULT rather than running the
+		// unimplemented one, which would answer with its own number.
+		let resolve = |dirfd: u64, path: u64, low: &mut u64| {
+			resolve_at_path(pid, dirfd as i32, path, low).unwrap_or(0)
+		};
+		let number: libc::c_long = match nr {
+			n if n == libc::SYS_openat => {
+				// openat(dirfd, path, flags, mode) -> open(path, flags, mode)
+				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+				p.rsi = regs.rdx;
+				p.rdx = regs.r10;
+				libc::SYS_open
+			},
+			n if n == libc::SYS_mkdirat => {
+				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+				p.rsi = regs.rdx;
+				libc::SYS_mkdir
+			},
+			n if n == libc::SYS_mknodat => {
+				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+				p.rsi = regs.rdx;
+				p.rdx = regs.r10;
+				libc::SYS_mknod
+			},
+			n if n == libc::SYS_fchownat => {
+				// fchownat(dirfd, path, uid, gid, flags)
+				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+				p.rsi = regs.rdx;
+				p.rdx = regs.r10;
+				if regs.r8 & AT_SYMLINK_NOFOLLOW != 0 { libc::SYS_lchown } else { libc::SYS_chown }
+			},
+			n if n == libc::SYS_futimesat => {
+				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+				p.rsi = regs.rdx;
+				libc::SYS_utimes
+			},
+			n if n == libc::SYS_newfstatat => {
+				// newfstatat(dirfd, path, statbuf, flags)
+				let empty = regs.r10 & AT_EMPTY_PATH != 0
+					&& (regs.rsi == 0 || peek_byte(pid, regs.rsi) == Some(0));
+				p.rsi = regs.rdx;
+				p.rdx = 0;
+				if empty {
+					// fstat(dirfd, statbuf): what glibc's fstat() becomes
+					p.rdi = regs.rdi & 0xffff_ffff;
+					libc::SYS_fstat
+				} else {
+					p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+					if regs.r10 & AT_SYMLINK_NOFOLLOW != 0 { libc::SYS_lstat } else { libc::SYS_stat }
+				}
+			},
+			n if n == libc::SYS_unlinkat => {
+				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+				if regs.rdx & AT_REMOVEDIR != 0 { libc::SYS_rmdir } else { libc::SYS_unlink }
+			},
+			n if n == libc::SYS_renameat || n == libc::SYS_linkat => {
+				// renameat(olddirfd, old, newdirfd, new), linkat(.., flags)
+				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+				p.rsi = resolve(regs.rdx, regs.r10, &mut low);
+				p.rdx = 0;
+				p.r10 = 0;
+				p.r8 = 0;
+				if n == libc::SYS_renameat { libc::SYS_rename } else { libc::SYS_link }
+			},
+			n if n == libc::SYS_symlinkat => {
+				// symlinkat(target, newdirfd, linkpath): only the link is resolved
+				p.rsi = resolve(regs.rsi, regs.rdx, &mut low);
+				p.rdx = 0;
+				libc::SYS_symlink
+			},
+			n if n == libc::SYS_readlinkat => {
+				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+				p.rsi = regs.rdx;
+				p.rdx = regs.r10;
+				libc::SYS_readlink
+			},
+			n if n == libc::SYS_fchmodat => {
+				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+				p.rsi = regs.rdx;
+				libc::SYS_chmod
+			},
+			_ => {
+				// faccessat(dirfd, path, mode)
+				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
+				p.rsi = regs.rdx;
+				libc::SYS_access
+			},
+		};
+		p.orig_rax = number as u64;
+		p.rax = number as u64;
+		let used_scratch = low != top;
+		if used_scratch {
+			p.rsp = low;
+		}
+		if ptrace::setregs(pid, p).is_err() {
+			return false
+		}
+		if used_scratch {
+			self.reserved.insert(pid, saved_rsp);
+		}
+		if debug() {
+			eprintln!("kernel-compat: *at call {nr} -> plain call {number}");
+		}
+		used_scratch
 	}
 
 	/// statx (4.11) -> newfstatat (ancient), translating `struct stat` to
@@ -1285,10 +1451,27 @@ impl Tracer {
 			// -> newfstatat(dirfd, path, statbuf(scratch), flags(r10))
 			// Only AT_SYMLINK_NOFOLLOW: older kernels reject AT_NO_AUTOMOUNT
 			// (0x800) with EINVAL (reproduced on 2.6.17; 2.6.20 accepts it).
-			regs.r10 = regs.rdx & 0x100;
-			regs.rdx = scratch;
-			regs.orig_rax = libc::SYS_newfstatat as u64;
-			regs.rax = libc::SYS_newfstatat as u64;
+			let nofollow = regs.rdx & AT_SYMLINK_NOFOLLOW != 0;
+			if at_missing() {
+				// 2.6.15 and older have no newfstatat either: stat/lstat the
+				// path, resolved against the directory fd if it has one.
+				let mut low = scratch.wrapping_sub(16);
+				let path = resolve_at_path(pid, regs.rdi as i32, regs.rsi, &mut low).unwrap_or(0);
+				regs.rdi = path;
+				regs.rsi = scratch;
+				regs.rdx = 0;
+				if low != scratch.wrapping_sub(16) {
+					regs.rsp = low;
+				}
+				let number = if nofollow { libc::SYS_lstat } else { libc::SYS_stat } as u64;
+				regs.orig_rax = number;
+				regs.rax = number;
+			} else {
+				regs.r10 = regs.rdx & AT_SYMLINK_NOFOLLOW;
+				regs.rdx = scratch;
+				regs.orig_rax = libc::SYS_newfstatat as u64;
+				regs.rax = libc::SYS_newfstatat as u64;
+			}
 		}
 		if ptrace::setregs(pid, regs).is_err() {
 			return
@@ -1491,6 +1674,54 @@ fn reserve_relative_timeout(pid: Pid, timeout_ptr: u64, realtime: bool, saved_rs
 
 pub(crate) fn peek_word(pid: Pid, addr: u64) -> Option<u64> {
 	ptrace::read(pid, addr as AddressType).ok().map(|w| w as u64)
+}
+
+/// One byte of the tracee's memory, read through the aligned word around it so
+/// the read can never run past the page the byte is in.
+fn peek_byte(pid: Pid, addr: u64) -> Option<u8> {
+	let word = peek_word(pid, addr & !7)?;
+	Some(((word >> (8 * (addr & 7))) & 0xff) as u8)
+}
+
+/// The NUL-terminated path at `addr`, without the NUL. `None` when it cannot
+/// be read or is longer than the kernel would accept.
+fn read_path(pid: Pid, addr: u64) -> Option<Vec<u8>> {
+	let mut out = Vec::new();
+	while out.len() < PATH_MAX {
+		let byte = peek_byte(pid, addr + out.len() as u64)?;
+		if byte == 0 {
+			return Some(out)
+		}
+		out.push(byte);
+	}
+	None
+}
+
+/// The path to hand a plain (non-*at) call that stands in for an *at call with
+/// this directory fd. With the working directory, an absolute path or an empty
+/// one there is nothing to do. Otherwise the path is rebuilt as
+/// `/proc/self/fd/<dirfd>/<path>` in scratch memory below `low`, which then
+/// moves down past it: the kernel resolves that magic link to the directory,
+/// so the call behaves as it would have relative to the fd. This needs /proc,
+/// like the timerfd emulation.
+fn resolve_at_path(pid: Pid, dirfd: i32, path: u64, low: &mut u64) -> Option<u64> {
+	if dirfd == AT_FDCWD || path == 0 {
+		return Some(path)
+	}
+	let first = peek_byte(pid, path)?;
+	if first == b'/' || first == 0 {
+		return Some(path)
+	}
+	let relative = read_path(pid, path)?;
+	let mut full = format!("/proc/self/fd/{dirfd}/").into_bytes();
+	full.extend_from_slice(&relative);
+	full.push(0);
+	let addr = low.wrapping_sub(full.len() as u64) & !0xf;
+	if !write_struct(pid, addr, &full) {
+		return None
+	}
+	*low = addr;
+	Some(addr)
 }
 
 fn read_cstr(pid: Pid, addr: u64) -> String {
