@@ -202,8 +202,10 @@ fn prlimit64_missing() -> bool {
 }
 
 /// Probe once whether the kernel implements pipe2(2) (added in 2.6.27). Only
-/// then is pipe2 rewritten to pipe, which loses O_CLOEXEC and O_NONBLOCK.
-fn pipe2_missing() -> bool {
+/// then is pipe2 emulated: `emulated_syscalls` makes the pipe and applies
+/// O_NONBLOCK/O_CLOEXEC itself; the plain rewrite to pipe, which loses both, is
+/// only the fallback for when that cannot be set up.
+pub(crate) fn pipe2_missing() -> bool {
 	static MISSING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 	*MISSING.get_or_init(|| {
 		let mut fds = [0i32; 2];
@@ -951,10 +953,10 @@ impl Tracer {
 			return Some(translate_futex(pid, regs, &mut self.reserved));
 		}
 		if regs.orig_rax == libc::SYS_pipe2 as u64 && pipe2_missing() {
-			// pipe2 (2.6.27) -> pipe (ancient). The flags argument is lost
-			// entirely: neither O_NONBLOCK nor O_CLOEXEC is applied, and we
-			// cannot fix that from here. Callers that relied on pipe2 to set
-			// those flags will see a blocking, inheritable pipe.
+			// pipe2 (2.6.27) -> pipe (ancient). Fallback only: the flags are
+			// lost, so callers that relied on pipe2 to set O_NONBLOCK or
+			// O_CLOEXEC see a blocking, inheritable pipe. The normal path is
+			// `emulated_syscalls::pipe2`, which applies them.
 			let mut patched = regs;
 			patched.orig_rax = libc::SYS_pipe as u64;
 			patched.rax = libc::SYS_pipe as u64;

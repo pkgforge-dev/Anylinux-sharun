@@ -60,8 +60,8 @@ use std::{
 use nix::{errno::Errno, libc, sys::ptrace, unistd::Pid};
 
 use crate::kernel_compat::{
-	clockid_replacements, debug, debug_all, kernel_lt, not_implemented, peek_word, read_struct,
-	write_struct,
+	clockid_replacements, debug, debug_all, kernel_lt, not_implemented, peek_word, pipe2_missing,
+	read_struct, write_struct,
 };
 
 /// `EFD_CLOEXEC`/`TFD_CLOEXEC` and `EFD_SEMAPHORE` are deliberately not
@@ -118,6 +118,10 @@ enum Which {
 enum Step {
 	Socket,
 	Pipe { buffer: u64 },
+	/// pipe(buffer) for a pipe2 emulation: the fds go straight to the caller's
+	/// array, and the tracer only reads them back to name the ends for the
+	/// steps that follow. No timerfd bookkeeping.
+	PlainPipe { buffer: u64 },
 	Attach { fd: Which, addr: u64, length: u64, connect: bool },
 	Nonblock { fd: Which },
 	WriteInitial { fd: Which, buffer: u64 },
@@ -251,6 +255,7 @@ impl Emulations {
 			nr if nr == libc::SYS_timerfd_settime as u64 => self.timerfd_settime(pid, regs),
 			nr if nr == libc::SYS_timerfd_gettime as u64 => self.timerfd_gettime(pid, regs),
 			nr if nr == libc::SYS_fcntl as u64 => self.dupfd_cloexec(pid, regs),
+			nr if nr == libc::SYS_pipe2 as u64 => self.pipe2(pid, regs),
 			nr if nr == libc::SYS_pwritev as u64 => self.vector_io(pid, regs, true),
 			nr if nr == libc::SYS_preadv as u64 => self.vector_io(pid, regs, false),
 			nr if nr == libc::SYS_epoll_pwait as u64 => self.epoll_pwait(pid, regs),
@@ -344,6 +349,36 @@ impl Emulations {
 				"kernel-compat: fcntl(F_DUPFD_CLOEXEC) emulated as F_DUPFD + FD_CLOEXEC (fd {})",
 				regs.rdi
 			);
+		}
+		self.start_sequence(pid, regs, gadget, queue, Outcome::Call(0), 0)
+	}
+
+	/// pipe2(fds, flags) (2.6.27) -> pipe, then O_NONBLOCK and FD_CLOEXEC on both
+	/// ends. Dropping the flags is not harmless: a caller that asked for a
+	/// non-blocking pipe (an event loop's wake-up pipe, X.Org's input thread)
+	/// blocks in `read` forever, and libc wrappers that fall back to pipe+fcntl
+	/// on ENOSYS (musl) never get the chance because the call "succeeds".
+	fn pipe2(&mut self, pid: Pid, regs: libc::user_regs_struct) -> bool {
+		const PIPE_NONBLOCK: u64 = 0x800;
+		const PIPE_CLOEXEC: u64 = 0x80000;
+		let flags = regs.rsi;
+		// O_DIRECT (packet mode) has no older equivalent: leave it, and the
+		// no-flag case, to the plain rewrite.
+		if flags == 0 || flags & !(PIPE_NONBLOCK | PIPE_CLOEXEC) != 0 || !pipe2_missing() {
+			return false;
+		}
+		let Some(gadget) = gadget_for(pid, regs) else { return false };
+		let mut queue = VecDeque::from([Step::PlainPipe { buffer: regs.rdi }]);
+		if flags & PIPE_NONBLOCK != 0 {
+			queue.push_back(Step::Nonblock { fd: Which::ReadEnd });
+			queue.push_back(Step::Nonblock { fd: Which::WriteEnd });
+		}
+		if flags & PIPE_CLOEXEC != 0 {
+			queue.push_back(Step::FcntlCloexec { fd: Which::ReadEnd });
+			queue.push_back(Step::FcntlCloexec { fd: Which::WriteEnd });
+		}
+		if debug() {
+			eprintln!("kernel-compat: pipe2(flags {flags:#x}) emulated as pipe + fcntl");
 		}
 		self.start_sequence(pid, regs, gadget, queue, Outcome::Call(0), 0)
 	}
@@ -617,6 +652,21 @@ impl Emulations {
 			}
 		}
 
+		// A pipe2 emulation: the caller's array now holds the fds the next steps
+		// have to work on.
+		if let Some(Step::PlainPipe { buffer }) = completed {
+			let ends = match &active {
+				Active::Sequence { results, .. } if results.last().is_some_and(|rc| *rc >= 0) => {
+					read_struct(pid, buffer, 8)
+				},
+				_ => None,
+			};
+			if let (Some(raw), Active::Sequence { read_end, write_end, .. }) = (ends, &mut active) {
+				*read_end = i32::from_ne_bytes(raw[0..4].try_into().unwrap_or_default()) as i64;
+				*write_end = i32::from_ne_bytes(raw[4..8].try_into().unwrap_or_default()) as i64;
+			}
+		}
+
 		let failure = match &active {
 			Active::Sequence { results, .. } => {
 				results.iter().copied().find(|rc| (-4095..0).contains(rc))
@@ -822,7 +872,9 @@ fn build(step: &Step, active: &Active) -> (u64, [u64; 6]) {
 			libc::SYS_socket as u64,
 			[libc::AF_UNIX as u64, libc::SOCK_DGRAM as u64, 0, 0, 0, 0],
 		),
-		Step::Pipe { buffer } => (libc::SYS_pipe as u64, [buffer, 0, 0, 0, 0, 0]),
+		Step::Pipe { buffer } | Step::PlainPipe { buffer } => {
+			(libc::SYS_pipe as u64, [buffer, 0, 0, 0, 0, 0])
+		},
 		Step::Attach { fd: which, addr, length, connect } => (
 			if connect { libc::SYS_connect as u64 } else { libc::SYS_bind as u64 },
 			[fd_of(which), addr, length, 0, 0, 0],
