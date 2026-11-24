@@ -13,10 +13,7 @@ mod apprun;
 mod gio_launch_desktop;
 mod bwrap_wrapper;
 mod set_appdir_env;
-#[cfg(target_arch = "x86_64")]
-mod kernel_compat;
-#[cfg(target_arch = "x86_64")]
-mod emulated_syscalls;
+use old_linux_kernel_compat_layer as kernel_compat;
 use utils::*;
 
 
@@ -24,7 +21,7 @@ const SHARUN_NAME: &str = env!("CARGO_PKG_NAME");
 
 /// Internal-only flag used by the kernel-compat no_new_privs/execve probe. It
 /// is intentionally long so it cannot collide with an application argument.
-pub(crate) const SHARUN_NNP_PROBE_FLAG: &str =
+const SHARUN_NNP_PROBE_FLAG: &str =
 	"--sharun-internal-probe-execve-after-no-new-privs";
 
 
@@ -39,7 +36,7 @@ fn print_usage() {
 
 [ Options ]:");
 	println!("    -g,  --gen-lib-path         Generate a lib.path file
-	     --compat-exec CMD ...  Run CMD under the old kernel compatibility layer (x86_64)
+	     --compat-exec CMD ...  Run CMD under the old kernel compatibility layer (x86_64/aarch64)
 	-v,  --version              Print version
 	-h,  --help                 Print help
 
@@ -53,13 +50,14 @@ fn print_usage() {
 	SHARUN_PRINTENV=1              Print environment variables to stderr
 	SHARUN_LDNAME=ld.so            Specifies the name of the interpreter
 	SHARUN_OLD_KERNEL_COMPAT=1     Enable compatibility layer that allows
-	                                applications to run on ancient kernels;
+	                                applications to run on ancient kernels
+	                                (x86_64 down to 2.6.8, aarch64 down to 3.11);
 	                                set to 0 to disable, default is automatic
 	                                on kernels older than 4.0 or when statx is missing
-	                                (on kernels without seccomp-bpf, < 3.5, every
-	                                syscall is traced, which is slow; seccomp mode
-	                                sets no_new_privs, so setuid helpers cannot
-	                                gain privileges)
+	                                (on kernels without seccomp-bpf every syscall is
+	                                traced, which is slow; seccomp mode sets
+	                                no_new_privs, so setuid helpers cannot gain
+	                                privileges)
 	SHARUN_EXTRA_LIBRARY_PATH      Extra library directories with highest priority
 	SHARUN_FALLBACK_LIBRARY_PATH   Fallback library directories with lowest priority
 	SHARUN_MESA_PATH=/path         External mesa install dir (with lib/ and share/)
@@ -71,15 +69,24 @@ fn print_usage() {
 }
 
 fn main() {
+	kernel_compat::init(kernel_compat::Config {
+		env_enable: "SHARUN_OLD_KERNEL_COMPAT",
+		env_enable_fallback: Some("OLD_KERNEL_COMPAT"),
+		env_debug: "SHARUN_OLD_KERNEL_COMPAT_DEBUG",
+		env_debug_fallback: Some("OLD_KERNEL_COMPAT_DEBUG"),
+		env_debug_all: "SHARUN_OLD_KERNEL_COMPAT_DEBUG_ALL",
+		env_debug_all_fallback: Some("OLD_KERNEL_COMPAT_DEBUG_ALL"),
+		log_prefix: "[sharun]",
+		nnp_probe_flag: SHARUN_NNP_PROBE_FLAG,
+	});
+	kernel_compat::exit_if_internal_probe();
+
 	let mut exec_args: Vec<String> = env::args().collect();
 
-	// Handle the internal no_new_privs probe and `--compat-exec` before reading
-	// `/proc/self/exe` or setting `SHARUN_DIR`: `--compat-exec` may run from a
-	// renamed binary (e.g. `sharun-x86_64`) or a memfd, and must not leak a
-	// bogus `SHARUN_DIR` into the traced command's environment.
-	if exec_args.get(1).is_some_and(|arg| arg == SHARUN_NNP_PROBE_FLAG) {
-		exit(0)
-	}
+	// Handle `--compat-exec` before reading `/proc/self/exe` for `SHARUN_DIR`:
+	// `--compat-exec` may run from a renamed binary (e.g. `sharun-x86_64`) or a
+	// memfd, and must not leak a bogus `SHARUN_DIR` into the traced command's
+	// environment.
 	if exec_args.get(1).is_some_and(|arg| arg == "--compat-exec") {
 		let exe_name = env::current_exe()
 			.ok()
@@ -93,11 +100,11 @@ fn main() {
 			None => true,
 		};
 		if is_sharun_invocation {
-			#[cfg(target_arch = "x86_64")]
+			#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 			if exec_args.len() > 2 {
 				kernel_compat::run_command_traced(&exec_args[2..]);
 			}
-			eprintln!("Usage: sharun --compat-exec CMD [ARGS...] (x86_64 only)");
+			eprintln!("Usage: sharun --compat-exec CMD [ARGS...] (x86_64/aarch64 only)");
 			exit(1)
 		}
 	}
@@ -225,15 +232,8 @@ fn main() {
 			exit(1)
 		}
 	} else if bin_name == "AppRun" {
-		// Sentinel for the kernel-compat probe: a re-exec of this binary with
-		// no_new_privs set only checks whether execve works on this kernel, so
-		// exit immediately instead of recursing into the AppRun logic.
-		if exec_args.iter().any(|arg| arg.as_str() == SHARUN_NNP_PROBE_FLAG) {
-			exit(0)
-		}
-		#[cfg(target_arch = "x86_64")]
 		if kernel_compat::enabled() {
-			kernel_compat::run_apprun_traced(&sharun_dir, bin_dir, &exec_args);
+			kernel_compat::run_traced(&|| apprun::run_as_apprun(&sharun_dir, bin_dir, &exec_args));
 		}
 		apprun::run_as_apprun(&sharun_dir, bin_dir, &exec_args);
 	} else if bin_name == "gio-launch-desktop" {
