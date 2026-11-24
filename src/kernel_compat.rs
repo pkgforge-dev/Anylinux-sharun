@@ -1073,20 +1073,29 @@ impl Tracer {
 	) -> Option<bool> {
 		let mut regs = regs;
 		// open(path, flags, mode) / openat(dirfd, path, flags, mode)
-		let flags = if regs.orig_rax == libc::SYS_open as u64 {
-			Some(&mut regs.rsi)
-		} else if regs.orig_rax == libc::SYS_openat as u64 {
-			Some(&mut regs.rdx)
-		} else {
-			None
-		};
-		if let Some(flags) = flags {
-			if *flags & libc::O_CLOEXEC as u64 != 0 && open_cloexec_unknown() {
-				*flags &= !(libc::O_CLOEXEC as u64);
+		if regs.orig_rax == libc::SYS_open as u64 {
+			if regs.rsi & libc::O_CLOEXEC as u64 != 0 && open_cloexec_unknown() {
+				regs.rsi &= !(libc::O_CLOEXEC as u64);
 				let _ = ptrace::setregs(pid, regs);
 				if debug() {
 					eprintln!("kernel-compat: open O_CLOEXEC dropped (needs 2.6.23)");
 				}
+			}
+			return Some(false);
+		}
+		if regs.orig_rax == libc::SYS_openat as u64
+			&& regs.rdx & libc::O_CLOEXEC as u64 != 0
+			&& open_cloexec_unknown()
+		{
+			regs.rdx &= !(libc::O_CLOEXEC as u64);
+			if !at_missing() {
+				let _ = ptrace::setregs(pid, regs);
+			}
+			if debug() {
+				eprintln!("kernel-compat: open O_CLOEXEC dropped (needs 2.6.23)");
+			}
+			if !at_missing() {
+				return Some(false);
 			}
 		}
 		if regs.orig_rax == libc::SYS_futex as u64 {
