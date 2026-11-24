@@ -227,6 +227,16 @@ pub(crate) fn at_missing() -> bool {
 	})
 }
 
+/// `O_CLOEXEC` (0x80000) is an unknown `open` flag before 2.6.23. Mainline
+/// ignores it, but the Red Hat kernels of Fedora Core 3 (2.6.9) and 4 (2.6.11) give
+/// the same bit another meaning, and a missing file then fails with errno 530
+/// instead of `ENOENT`. A version check, not a probe: the bit is harmless where
+/// it is ignored and wrong everywhere else.
+fn open_cloexec_unknown() -> bool {
+	static UNKNOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*UNKNOWN.get_or_init(|| kernel_lt(2, 6, 23))
+}
+
 fn is_at_call(nr: u64) -> bool {
 	[
 		libc::SYS_openat, libc::SYS_mkdirat, libc::SYS_mknodat, libc::SYS_fchownat,
@@ -1061,6 +1071,33 @@ impl Tracer {
 		pid: Pid,
 		regs: libc::user_regs_struct,
 	) -> Option<bool> {
+		let mut regs = regs;
+		// open(path, flags, mode) / openat(dirfd, path, flags, mode)
+		if regs.orig_rax == libc::SYS_open as u64 {
+			if regs.rsi & libc::O_CLOEXEC as u64 != 0 && open_cloexec_unknown() {
+				regs.rsi &= !(libc::O_CLOEXEC as u64);
+				let _ = ptrace::setregs(pid, regs);
+				if debug() {
+					eprintln!("kernel-compat: open O_CLOEXEC dropped (needs 2.6.23)");
+				}
+			}
+			return Some(false);
+		}
+		if regs.orig_rax == libc::SYS_openat as u64
+			&& regs.rdx & libc::O_CLOEXEC as u64 != 0
+			&& open_cloexec_unknown()
+		{
+			regs.rdx &= !(libc::O_CLOEXEC as u64);
+			if !at_missing() {
+				let _ = ptrace::setregs(pid, regs);
+			}
+			if debug() {
+				eprintln!("kernel-compat: open O_CLOEXEC dropped (needs 2.6.23)");
+			}
+			if !at_missing() {
+				return Some(false);
+			}
+		}
 		if regs.orig_rax == libc::SYS_futex as u64 {
 			// A timed WAIT_BITSET reserves scratch; if so it needs its exit
 			// stop so on_syscall_exit can restore rsp.
