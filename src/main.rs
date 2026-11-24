@@ -36,7 +36,6 @@ fn print_usage() {
 
 [ Options ]:");
 	println!("    -g,  --gen-lib-path         Generate a lib.path file
-	     --compat-exec CMD ...  Run CMD under the old kernel compatibility layer (x86_64/aarch64)
 	-v,  --version              Print version
 	-h,  --help                 Print help
 
@@ -82,32 +81,6 @@ fn main() {
 	kernel_compat::exit_if_internal_probe();
 
 	let mut exec_args: Vec<String> = env::args().collect();
-
-	// Handle `--compat-exec` before reading `/proc/self/exe` for `SHARUN_DIR`:
-	// `--compat-exec` may run from a renamed binary (e.g. `sharun-x86_64`) or a
-	// memfd, and must not leak a bogus `SHARUN_DIR` into the traced command's
-	// environment.
-	if exec_args.get(1).is_some_and(|arg| arg == "--compat-exec") {
-		let exe_name = env::current_exe()
-			.ok()
-			.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
-		let is_sharun_invocation = match exe_name.as_deref() {
-			Some(name) => {
-				name == SHARUN_NAME
-					|| name.starts_with(&format!("{SHARUN_NAME}-"))
-					|| name.starts_with("memfd:")
-			}
-			None => true,
-		};
-		if is_sharun_invocation {
-			#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-			if exec_args.len() > 2 {
-				kernel_compat::run_command_traced(&exec_args[2..]);
-			}
-			eprintln!("Usage: sharun --compat-exec CMD [ARGS...] (x86_64/aarch64 only)");
-			exit(1)
-		}
-	}
 
 	let sharun = env::current_exe().unwrap_or_else(|err|{
 		eprintln!("Failed to get sharun path: {err}");
