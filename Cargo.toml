@@ -24,5 +24,5 @@ opt-level = 0
 goblin = "0.8.2"
 walkdir = "2.5.0"
 userland-execve = { git = "https://github.com/pkgforge-dev/userland-execve-rust", rev = "d2b58d8b5164b8c815c3f504eb3ddfff47f31556" } # v0.3.2
-old-linux-kernel-compat-layer = { git = "https://github.com/pkgforge-dev/old-linux-kernel-compat-layer", rev = "ee9d23877fb39c1a7bb3cbdd7ba88b46504ebcaf" } # v0.1.0
+old-linux-kernel-compat-layer = { git = "https://github.com/pkgforge-dev/old-linux-kernel-compat-layer", rev = "c8593d17684b6a1bb982e1c58c4cb703993881b4" } # v0.1.1
 nix = { version = "0.31.1", features = [ "fs" ] }
