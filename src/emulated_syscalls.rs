@@ -359,8 +359,8 @@ impl Emulations {
 	/// blocks in `read` forever, and libc wrappers that fall back to pipe+fcntl
 	/// on ENOSYS (musl) never get the chance because the call "succeeds".
 	fn pipe2(&mut self, pid: Pid, regs: libc::user_regs_struct) -> bool {
-		const PIPE_NONBLOCK: u64 = 0x800;
-		const PIPE_CLOEXEC: u64 = 0x80000;
+		const PIPE_NONBLOCK: u64 = libc::O_NONBLOCK as u64;
+		const PIPE_CLOEXEC: u64 = libc::O_CLOEXEC as u64;
 		let flags = regs.rsi;
 		// O_DIRECT (packet mode) has no older equivalent: leave it, and the
 		// no-flag case, to the plain rewrite.
@@ -657,13 +657,15 @@ impl Emulations {
 		if let Some(Step::PlainPipe { buffer }) = completed {
 			let ends = match &active {
 				Active::Sequence { results, .. } if results.last().is_some_and(|rc| *rc >= 0) => {
-					read_struct(pid, buffer, 8)
+					pipe_ends(pid, buffer)
 				},
 				_ => None,
 			};
-			if let (Some(raw), Active::Sequence { read_end, write_end, .. }) = (ends, &mut active) {
-				*read_end = i32::from_ne_bytes(raw[0..4].try_into().unwrap_or_default()) as i64;
-				*write_end = i32::from_ne_bytes(raw[4..8].try_into().unwrap_or_default()) as i64;
+			if let (Some((read, write)), Active::Sequence { read_end, write_end, .. }) =
+				(ends, &mut active)
+			{
+				*read_end = read;
+				*write_end = write;
 			}
 		}
 
@@ -914,6 +916,14 @@ fn build(step: &Step, active: &Active) -> (u64, [u64; 6]) {
 	}
 }
 
+/// The two fds a pipe call stored in the tracee's array, read end first.
+fn pipe_ends(pid: Pid, buffer: u64) -> Option<(i64, i64)> {
+	let raw = read_struct(pid, buffer, 8)?;
+	let read_end = i32::from_ne_bytes(raw[0..4].try_into().ok()?) as i64;
+	let write_end = i32::from_ne_bytes(raw[4..8].try_into().ok()?) as i64;
+	Some((read_end, write_end))
+}
+
 /// Take a write handle on the pipe the tracee just created, so a deadline can be
 /// served without going near the tracee, and adopt its read end. A socket
 /// cannot be reopened this way, which is why eventfd uses a self-connected one
@@ -925,9 +935,7 @@ fn capture_pipe(
 	buffer: u64,
 	clockid: i32,
 ) -> Option<(i64, i64)> {
-	let raw = read_struct(pid, buffer, 8)?;
-	let read_end = i32::from_ne_bytes(raw[0..4].try_into().ok()?) as i64;
-	let write_end = i32::from_ne_bytes(raw[4..8].try_into().ok()?) as i64;
+	let (read_end, write_end) = pipe_ends(pid, buffer)?;
 	let handle = match std::fs::OpenOptions::new()
 		.write(true)
 		.custom_flags(libc::O_NONBLOCK)

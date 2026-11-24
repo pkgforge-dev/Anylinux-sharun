@@ -956,7 +956,9 @@ impl Tracer {
 			// pipe2 (2.6.27) -> pipe (ancient). Fallback only: the flags are
 			// lost, so callers that relied on pipe2 to set O_NONBLOCK or
 			// O_CLOEXEC see a blocking, inheritable pipe. The normal path is
-			// `emulated_syscalls::pipe2`, which applies them.
+			// `emulated_syscalls::pipe2`, which applies them. This is never
+			// reached in seccomp mode: that needs 3.5, and pipe2 is missing only
+			// below 2.6.27.
 			let mut patched = regs;
 			patched.orig_rax = libc::SYS_pipe as u64;
 			patched.rax = libc::SYS_pipe as u64;
