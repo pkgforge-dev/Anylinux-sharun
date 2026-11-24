@@ -216,6 +216,11 @@ impl Emulations {
 		self.active.contains_key(&pid)
 	}
 
+	/// True when the next syscall stop is the entry of a call the emulation made.
+	pub fn expects_entry(&self, pid: Pid) -> bool {
+		matches!(self.active.get(&pid), Some(Active::Sequence { at_entry: true, .. }))
+	}
+
 	/// Forget the tracee's in-flight emulation. The emulated fds themselves stay:
 	/// another process may have inherited them, and a stale one is dropped as
 	/// soon as a write finds nobody reading.
