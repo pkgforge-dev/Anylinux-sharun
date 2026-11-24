@@ -1257,11 +1257,14 @@ impl Tracer {
 		// every kernel that implements those calls.
 		if let Some(nr) = self.last_syscall.get(&pid).copied() {
 			// Highest syscall number each kernel has: 2.6.15 stops at 255
-			// (inotify_rm_watch), 2.6.16 at 272 (unshare), 2.6.17 at 278.
+			// (inotify_rm_watch), 2.6.16 at 272 (unshare), 2.6.17 at 278
+			// (vmsplice), 2.6.18 at 279 (move_pages).
 			let above_table: u64 = if kernel_lt(2, 6, 16) {
 				255
 			} else if kernel_lt(2, 6, 17) {
 				272
+			} else if kernel_lt(2, 6, 18) {
+				278
 			} else {
 				279
 			};
@@ -1370,8 +1373,17 @@ impl Tracer {
 				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
 				if regs.rdx & AT_REMOVEDIR != 0 { libc::SYS_rmdir } else { libc::SYS_unlink }
 			},
+			n if n == libc::SYS_linkat && regs.r8 != 0 => {
+				// The kernels this stands in for (2.6.16, 2.6.17) refuse any
+				// linkat flag with EINVAL: AT_SYMLINK_FOLLOW only works from
+				// 2.6.18, and link() would hardlink the symlink itself instead of
+				// its target. tkill(0, 0) is the plain call that fails with EINVAL.
+				p.rdi = 0;
+				p.rsi = 0;
+				libc::SYS_tkill
+			},
 			n if n == libc::SYS_renameat || n == libc::SYS_linkat => {
-				// renameat(olddirfd, old, newdirfd, new), linkat(.., flags)
+				// renameat(olddirfd, old, newdirfd, new), linkat(.., flags = 0)
 				p.rdi = resolve(regs.rdi, regs.rsi, &mut low);
 				p.rsi = resolve(regs.rdx, regs.r10, &mut low);
 				p.rdx = 0;
@@ -1687,12 +1699,19 @@ fn peek_byte(pid: Pid, addr: u64) -> Option<u8> {
 /// be read or is longer than the kernel would accept.
 fn read_path(pid: Pid, addr: u64) -> Option<Vec<u8>> {
 	let mut out = Vec::new();
+	let mut at = addr;
+	// A word at a time: one ptrace read per byte is 40 us extra for every
+	// translated call that goes through a directory fd. An aligned word never
+	// crosses a page, so it cannot run past the end of the mapping either.
 	while out.len() < PATH_MAX {
-		let byte = peek_byte(pid, addr + out.len() as u64)?;
-		if byte == 0 {
-			return Some(out)
+		let word = peek_word(pid, at & !7)?.to_le_bytes();
+		for &byte in &word[(at & 7) as usize..] {
+			if byte == 0 {
+				return Some(out)
+			}
+			out.push(byte);
 		}
-		out.push(byte);
+		at = (at & !7) + 8;
 	}
 	None
 }
