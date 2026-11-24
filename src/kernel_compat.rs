@@ -383,6 +383,27 @@ fn kernel_echoes_number() -> bool {
 	*ECHOES.get_or_init(|| kernel_lt(2, 6, 19))
 }
 
+/// Highest x86_64 syscall number present in this kernel's table, cached once.
+/// Only used when `kernel_echoes_number()` is true (< 2.6.19): 2.6.12 stops at
+/// 250 (`keyctl`), 2.6.13–2.6.15 at 255 (`inotify_rm_watch`), 2.6.16 at 272
+/// (`unshare`), 2.6.17 at 278 (`vmsplice`), 2.6.18 at 279 (`move_pages`).
+fn syscall_table_max() -> u64 {
+	static MAX: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+	*MAX.get_or_init(|| {
+		if kernel_lt(2, 6, 13) {
+			250
+		} else if kernel_lt(2, 6, 16) {
+			255
+		} else if kernel_lt(2, 6, 17) {
+			272
+		} else if kernel_lt(2, 6, 18) {
+			278
+		} else {
+			279
+		}
+	})
+}
+
 /// Whether the compatibility tracer should run for this launch.
 pub fn enabled() -> bool {
 	match env::var(ENV_ENABLE) {
@@ -1256,18 +1277,6 @@ impl Tracer {
 		// returning fd 291, `openat2` 437 returning fd 437 -- into ENOSYS on
 		// every kernel that implements those calls.
 		if let Some(nr) = self.last_syscall.get(&pid).copied() {
-			// Highest syscall number each kernel has: 2.6.15 stops at 255
-			// (inotify_rm_watch), 2.6.16 at 272 (unshare), 2.6.17 at 278
-			// (vmsplice), 2.6.18 at 279 (move_pages).
-			let above_table: u64 = if kernel_lt(2, 6, 16) {
-				255
-			} else if kernel_lt(2, 6, 17) {
-				272
-			} else if kernel_lt(2, 6, 18) {
-				278
-			} else {
-				279
-			};
 			// Only an *untranslated* call can be echoing: a number the kernel
 			// really does not have is passed through untouched, whereas a
 			// rewritten one executes a different syscall whose result is its own
@@ -1276,8 +1285,8 @@ impl Tracer {
 			// buffer). 64-bit tracees only: the i386 entry path returns a real
 			// -ENOSYS, and numbers this high are ordinary syscalls there.
 			let echoed = regs.cs == 0x33
-				&& nr > above_table
 				&& kernel_echoes_number()
+				&& nr > syscall_table_max()
 				&& regs.orig_rax == nr;
 			// `synthesized` is the count this layer just wrote into rax: a request
 			// for exactly 318 bytes would otherwise match its own syscall number
