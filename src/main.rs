@@ -206,7 +206,7 @@ fn main() {
 		}
 	} else if bin_name == "AppRun" {
 		if kernel_compat::enabled() {
-			kernel_compat::run_traced(&|| apprun::run_as_apprun(&sharun_dir, bin_dir, &exec_args));
+			kernel_compat::run_traced(|| apprun::run_as_apprun(&sharun_dir, bin_dir, &exec_args));
 		}
 		apprun::run_as_apprun(&sharun_dir, bin_dir, &exec_args);
 	} else if bin_name == "gio-launch-desktop" {
