@@ -457,6 +457,14 @@ pub fn run_command_traced(args: &[String]) -> ! {
 
 /// Fork, trace the child and let it call `launch`, which must not return.
 fn run_traced(launch: &dyn Fn()) -> ! {
+	// Already running under a tracer (for example, `AppRun` started inside
+	// `sharun --compat-exec`): the outer tracer follows forks and covers this
+	// process too, so run directly without trying to nest ptrace or printing a
+	// misleading "ptrace unavailable" warning.
+	if already_traced() {
+		launch();
+		exit(1)
+	}
 	// If ptrace is blocked (e.g. a container's seccomp policy), don't turn a
 	// runnable app into a failure: run it untraced, exactly as if this layer
 	// were disabled. On a genuinely ancient kernel glibc dies on its own, which
@@ -517,6 +525,20 @@ fn run_traced(launch: &dyn Fn()) -> ! {
 		// Could not fork the tracer: run untraced rather than fail.
 		Err(_) => { launch(); exit(1) },
 	}
+}
+
+/// True when this process already has a ptrace tracer attached (`TracerPid != 0`
+/// in `/proc/self/status`).
+fn already_traced() -> bool {
+	let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+		return false
+	};
+	for line in status.lines() {
+		if let Some(rest) = line.strip_prefix("TracerPid:") {
+			return rest.trim().parse::<i32>().is_ok_and(|pid| pid != 0);
+		}
+	}
+	false
 }
 
 /// Cheap probe for whether `PTRACE_TRACEME` is permitted here.
