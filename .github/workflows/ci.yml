@@ -1,7 +1,18 @@
 name: CI
 
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag created by release-plz to attach assets to
+        type: string
+        required: true
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Optional existing release tag to attach assets to (leave empty to draft a new release from Cargo.toml)
+        type: string
+        required: false
 
 env:
   ZIG_VERSION: 0.16.0
@@ -14,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       # The manifest generator needs the real libraries and public headers,
       # so run it in a current Arch container. The resulting manifests are
@@ -83,6 +96,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Download stub manifests
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -289,15 +304,17 @@ jobs:
             sharun+helper-libs-${{ matrix.arch }}.tar.sha256
 
   release:
-    name: Draft release
+    name: Publish release assets
     needs: build
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || inputs.tag != ''
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Download artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -309,16 +326,31 @@ jobs:
         run: |
           chmod +x sharun-*
           cp sharun-x86_64 sharun
-          echo "VERSION=$(./sharun --version | awk '{print $NF}')" >> "${GITHUB_ENV}"
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "VERSION=${{ inputs.tag }}" >> "${GITHUB_ENV}"
+          else
+            echo "VERSION=$(./sharun --version | awk '{print $NF}')" >> "${GITHUB_ENV}"
+          fi
 
-      - name: Check tag doesn't exist
+      - name: Check tag doesn't exist (manual draft mode)
+        if: inputs.tag == ''
         run: |
           if git ls-remote --tags origin "refs/tags/$VERSION" | grep -q "$VERSION"; then
             echo "Error: tag $VERSION already exists. Bump the version in Cargo.toml first."
             exit 1
           fi
 
-      - name: Draft Release
+      - name: Attach assets to release-plz release
+        if: inputs.tag != ''
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: "${{ env.VERSION }}"
+          files: |
+            sharun-*
+            sharun+helper-libs-*
+
+      - name: Draft Release (manual dispatch)
+        if: inputs.tag == ''
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           name: "${{ env.VERSION }}"
