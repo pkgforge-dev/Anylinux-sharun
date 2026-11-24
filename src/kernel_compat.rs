@@ -763,6 +763,12 @@ struct Tracer {
 	configured: HashSet<Pid>,
 	in_syscall: HashMap<Pid, bool>,
 	last_syscall: HashMap<Pid, u64>,
+	/// Where the latest syscall-exit stop of each tracee happened (`rip`,
+	/// `orig_rax`), to recognize the repeat of an exit that returned -ENOSYS.
+	last_exit: HashMap<Pid, (u64, u64)>,
+	/// Set once a repeated exit stop has been seen, which only the kernels
+	/// that report every exit twice produce.
+	exit_repeats: bool,
 	statx: HashMap<Pid, StatxState>,
 	/// Argument of a termios2 TCGETS2 rewritten to TCGETS, whose two speed
 	/// fields still have to be filled in once the kernel has answered.
@@ -820,6 +826,7 @@ impl Tracer {
 		self.configured.remove(&pid);
 		self.in_syscall.remove(&pid);
 		self.last_syscall.remove(&pid);
+		self.last_exit.remove(&pid);
 		self.statx.remove(&pid);
 		self.termios2_get.remove(&pid);
 		self.emulated.forget(pid);
@@ -1000,6 +1007,10 @@ impl Tracer {
 							self.resume(pid, None);
 						}
 					} else {
+						if self.is_repeated_exit(pid) {
+							self.resume(pid, None);
+							continue;
+						}
 						if self.emulated.busy(pid) {
 							// Inside an emulation every stop belongs to it: the
 							// tracee is running our calls, not the application's.
@@ -1098,6 +1109,34 @@ impl Tracer {
 			return true;
 		}
 		false
+	}
+
+	/// Linux 2.6.12 reports the exit of every syscall twice, which moves the
+	/// entry/exit pairing by one stop for good (and an emulation then takes the
+	/// repeat for the entry of its next call). The kernel always sets rax to
+	/// -ENOSYS before it reports an entry, so a stop that should be an entry but
+	/// has another rax is such a repeat. The repeat of a call that itself
+	/// returned -ENOSYS has that rax too; it is the one that stops again at the
+	/// same place, for the same call, as the exit before it. That is only a
+	/// repeat on a kernel that has been seen to report exits twice: elsewhere
+	/// the same call made twice from the same instruction is just that.
+	fn is_repeated_exit(&mut self, pid: Pid) -> bool {
+		let entry_expected = if self.emulated.busy(pid) {
+			self.emulated.expects_entry(pid)
+		} else {
+			!*self.in_syscall.get(&pid).unwrap_or(&false)
+		};
+		if !entry_expected {
+			return false
+		}
+		let Ok(regs) = ptrace::getregs(pid) else { return false };
+		if regs.rax as u32 != -libc::ENOSYS as u32 {
+			self.exit_repeats = true;
+			return true
+		}
+		self.exit_repeats
+			&& !self.emulated.busy(pid)
+			&& self.last_exit.get(&pid) == Some(&(regs.rip, regs.orig_rax))
 	}
 
 	fn on_syscall_stop(&mut self, pid: Pid) {
@@ -1237,6 +1276,7 @@ impl Tracer {
 				return
 			},
 		};
+		self.last_exit.insert(pid, (regs.rip, regs.orig_rax));
 		// Same rule as on the way in: nothing here applies to a 32-bit tracee,
 		// whose numbers match these constants only by accident.
 		if regs.cs != 0x33 {
@@ -1984,6 +2024,8 @@ fn supervise(child: Pid, use_seccomp: bool) -> ! {
 		configured: HashSet::from([child]),
 		in_syscall: HashMap::new(),
 		last_syscall: HashMap::new(),
+		last_exit: HashMap::new(),
+		exit_repeats: false,
 		statx: HashMap::new(),
 		termios2_get: HashMap::new(),
 		emulated: crate::emulated_syscalls::Emulations::new(),
