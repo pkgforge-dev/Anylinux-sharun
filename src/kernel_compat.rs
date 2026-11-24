@@ -1129,6 +1129,10 @@ impl Tracer {
 		if !entry_expected {
 			return false
 		}
+		// Consume `last_exit` on every expected-entry stop so a repeat can only
+		// match the stop immediately after an exit, never the real entry of a
+		// subsequent identical syscall made from the same instruction.
+		let prev_exit = self.last_exit.remove(&pid);
 		let Ok(regs) = ptrace::getregs(pid) else { return false };
 		if regs.rax as u32 != -libc::ENOSYS as u32 {
 			self.exit_repeats = true;
@@ -1136,7 +1140,7 @@ impl Tracer {
 		}
 		self.exit_repeats
 			&& !self.emulated.busy(pid)
-			&& self.last_exit.get(&pid) == Some(&(regs.rip, regs.orig_rax))
+			&& prev_exit == Some((regs.rip, regs.orig_rax))
 	}
 
 	fn on_syscall_stop(&mut self, pid: Pid) {
