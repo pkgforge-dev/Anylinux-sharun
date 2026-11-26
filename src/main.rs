@@ -50,7 +50,7 @@ fn print_usage() {
 	SHARUN_LDNAME=ld.so            Specifies the name of the interpreter
 	SHARUN_OLD_KERNEL_COMPAT=1     Enable compatibility layer that allows
 	                                applications to run on ancient kernels
-	                                (x86_64 down to 2.6.8, aarch64 down to 3.11);
+	                                (x86_64 down to 2.6.0, aarch64 down to 3.11);
 	                                set to 0 to disable, default is automatic
 	                                on kernels older than 4.0 or when statx is missing
 	                                (on kernels without seccomp-bpf every syscall is
