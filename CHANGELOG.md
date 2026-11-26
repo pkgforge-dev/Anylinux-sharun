@@ -1,4 +1,14 @@
 
+## [3.11.0](https://github.com/pkgforge-dev/Anylinux-sharun/compare/3.10.0...3.11.0) - 2026-11-26
+
+### ⛰️  Features
+
+- Update old-linux-kernel-compat-layer to v0.2.0 ([#69](https://github.com/pkgforge-dev/Anylinux-sharun/pull/69)) - ([058c385](https://github.com/pkgforge-dev/Anylinux-sharun/commit/058c3850884bfefe175bfaa2507aff0012aa63e0))
+
+### ⚙️ Miscellaneous Tasks
+
+- Enable git_only in release-plz config - ([0f1ab1c](https://github.com/pkgforge-dev/Anylinux-sharun/commit/0f1ab1cbad5d8f78f0b0ef67d9e05b2596c6d228))
+
 ## [3.10.0] - 2026-11-24
 
 ### 🐛 Bug Fixes
