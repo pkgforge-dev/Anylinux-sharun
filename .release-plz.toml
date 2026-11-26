@@ -2,10 +2,9 @@
 allow_dirty = false
 changelog_update = true
 dependencies_update = false
+git_only = true
 git_release_enable = false
 pr_labels = ["release"]
-publish_allow_dirty = false
-publish = false
 semver_check = false
 release_always = false
 git_release_body = """
@@ -23,7 +22,6 @@ name = "sharun"
 git_tag_name = "{{ version }}"
 git_release_enable = true
 git_release_draft = false
-publish = false
 changelog_path = "./CHANGELOG.md"
 
 [changelog]
